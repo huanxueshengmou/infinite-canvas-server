@@ -63,10 +63,14 @@ export default function CollaborationPage() {
         setBusy(true); setError("");
         try {
             const data = await collaborationApi<CollaborationSession & { roomId?: string }>(register ? "/auth/register" : "/auth/login", {
-                method: "POST", body: JSON.stringify(register ? { username: values.username, password: values.password, inviteToken: invite, invitePassword: values.invitePassword || "" } : { username: values.username, password: values.password }),
+                method: "POST", body: JSON.stringify({
+                    username: values.username, password: values.password,
+                    ...(register && invite ? { inviteToken: invite, invitePassword: values.invitePassword || "" } : {}),
+                }),
             });
-            acceptSession(data);
+            acceptSession(data); setRegister(false);
             if (data.roomId) { setInvite(""); invitation = ""; navigate(`/collaboration/${data.roomId}`); }
+            else if (register) navigate("/collaboration");
         } catch (error) { setError((error as Error).message); }
         finally { setBusy(false); }
     };
@@ -101,16 +105,21 @@ export default function CollaborationPage() {
                 </header>
                 {error && <Alert type="error" title={error} className="mb-6" />}
                 {loading ? <p>正在连接协作服务…</p> : !session ? <div className="mx-auto max-w-md">
-                    <h2 className="mb-3 text-xl font-medium">{register ? "接受邀请并注册" : "登录协作账户"}</h2>
+                    <h2 className="mb-3 text-xl font-medium">{register ? (invite ? "接受邀请并注册" : "注册协作账户") : "登录协作账户"}</h2>
                     <p className="mb-6 text-sm opacity-65">每人使用自己的账户。共享画布实时同步，隐私节点仅创建者可见。</p>
                     {!meta && <Button className="mb-4" onClick={() => window.location.reload()}>重新连接服务器</Button>}
-                    <Form key={register ? "register" : "login"} layout="vertical" onFinish={authenticate}>
-                        <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input autoComplete="username" /></Form.Item>
+                    <Form key={register ? "register" : "login"} layout="vertical" onFinish={authenticate} disabled={busy}>
+                        <Form.Item name="username" label="用户名" extra={register ? "支持中文、字母、数字及 _ . @ -" : undefined} rules={[{ required: true }]}><Input autoComplete="username" /></Form.Item>
                         <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 12, message: "密码至少 12 个字符" }]}><Input.Password autoComplete={register ? "new-password" : "current-password"} /></Form.Item>
-                        {register && <Form.Item name="invitePassword" label="分享口令（若邀请人设置了口令）"><Input.Password autoComplete="off" /></Form.Item>}
-                        <Button type="primary" htmlType="submit" loading={busy} disabled={!meta} block>{register ? "注册并加入画布" : "登录"}</Button>
+                        {register && <Form.Item name="confirmPassword" label="确认密码" dependencies={["password"]} rules={[
+                            { required: true, message: "请再次输入密码" },
+                            ({ getFieldValue }) => ({ validator: (_, value) => !value || getFieldValue("password") === value ? Promise.resolve() : Promise.reject(new Error("两次输入的密码不一致")) }),
+                        ]}><Input.Password autoComplete="new-password" /></Form.Item>}
+                        {register && invite && <Form.Item name="invitePassword" label="分享口令（若邀请人设置了口令）"><Input.Password autoComplete="off" /></Form.Item>}
+                        <Button type="primary" htmlType="submit" loading={busy} disabled={!meta} block>{register ? (invite ? "注册并加入画布" : "注册并登录") : "登录"}</Button>
                     </Form>
-                    {invite ? <Button type="text" className="mt-4" onClick={() => setRegister(!register)}>{register ? "已有账户，去登录" : "还没有账户，接受邀请注册"}</Button> : <p className="mt-5 text-xs opacity-60">新成员需通过画布所有者的分享链接注册。</p>}
+                    <Button type="text" className="mt-4" disabled={busy} onClick={() => { setRegister(!register); setError(""); }}>{register ? "已有账户，去登录" : (invite ? "还没有账户，接受邀请注册" : "没有账户？立即注册")}</Button>
+                    {register && !invite && <p className="mt-3 text-xs opacity-60">注册后可以创建自己的画布，通过分享链接加入他人的画布。</p>}
                 </div> : invite ? <div className="mx-auto max-w-md space-y-4"><h2 className="text-xl font-medium">你收到一份画布邀请</h2><Input.Password aria-label="分享口令" placeholder="分享口令（未设置时留空）" value={invitePassword} onChange={(event) => setInvitePassword(event.target.value)} /><Space><Button type="primary" loading={busy} onClick={() => void join()}>接受邀请</Button><Button onClick={() => { setInvite(""); invitation = ""; }}>暂不加入</Button></Space></div> : <>
                     <div className="mb-6 flex items-center justify-between"><p className="text-sm opacity-65">选择画布，与团队一起创作。</p><Button icon={<Plus className="size-4" />} onClick={() => setCreateOpen(true)}>创建协作画布</Button></div>
                     {!rooms.length ? <div className="py-24 text-center opacity-60">还没有协作画布。创建一个，或打开别人发来的邀请链接。</div> : <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{rooms.map((room) => <button key={room.id} className="rounded-xl border p-6 text-left transition hover:opacity-75" style={{ borderColor: theme.node.stroke, background: theme.node.panel }} onClick={() => navigate(`/collaboration/${room.id}`)}><Users className="mb-5 size-6 opacity-60" /><h2 className="truncate text-lg font-medium">{room.title}</h2><p className="mt-2 text-xs opacity-60">{room.role === "owner" ? "我的画布" : room.role === "editor" ? "可以编辑" : "仅可查看"}</p></button>)}</div>}

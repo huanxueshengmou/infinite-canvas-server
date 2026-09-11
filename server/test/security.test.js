@@ -94,7 +94,7 @@ test("optimistic versions and idempotent receipts prevent lost or duplicate writ
   assert.equal(overLimit.statusCode, 413);
 });
 
-test("registration needs a current invitation and never grants owner or administrator access", async (t) => {
+test("invitation registration needs a current share and never grants owner or administrator access", async (t) => {
   const f = await fixture(t);
   const owner = await f.login(await f.user("owner", true));
   const room = await f.room(owner);

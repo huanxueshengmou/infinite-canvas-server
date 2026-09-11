@@ -144,22 +144,30 @@ export async function createApp(options = {}) {
     return share;
   }
   const inviteSchema = z.object({ token: z.string().min(1), password: z.string().default("") }).strict();
-  const registrationSchema = credentialsSchema.extend({ inviteToken: z.string().min(1), invitePassword: z.string().default("") }).strict();
+  const registrationSchema = credentialsSchema.extend({ inviteToken: z.string().min(1).optional(), invitePassword: z.string().default("") }).strict();
   app.post("/api/auth/register", { config: authRate }, async (request, reply) => {
     const input = registrationSchema.parse(request.body);
-    const share = await getShare(input.inviteToken, input.invitePassword);
+    const share = input.inviteToken ? await getShare(input.inviteToken, input.invitePassword) : null;
     const passwordHash = await hashPassword(input.password);
     const user = { id: randomUUID(), username: input.username.toLowerCase(), admin: false };
-    await rooms.lock(share.room_id, async () => {
-      const current = await getShare(input.inviteToken, input.invitePassword);
-      if (await db.get("SELECT id FROM users WHERE username=?", [user.username])) throw new HttpError(409, "该用户名无法注册，请换一个名称");
-      await db.transaction([
-        { sql: "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)", params: [user.id, user.username, passwordHash, Date.now()] },
-        { sql: "INSERT INTO members(room_id,user_id,role,share_id) VALUES(?,?,?,?)", params: [current.room_id, user.id, current.role, current.id] },
-        auditStep(user.id, current.room_id, "member.join", current.id),
-      ]);
-    });
-    return { ...(await startSession(user, reply)), roomId: share.room_id };
+    const createAccount = async () => {
+      const current = share ? await getShare(input.inviteToken, input.invitePassword) : null;
+      try {
+        await db.transaction([
+          { sql: "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?) ON CONFLICT(username) DO NOTHING", params: [user.id, user.username, passwordHash, Date.now()], expectChanges: 1 },
+          ...(current ? [
+            { sql: "INSERT INTO members(room_id,user_id,role,share_id) VALUES(?,?,?,?)", params: [current.room_id, user.id, current.role, current.id] },
+            auditStep(user.id, current.room_id, "member.join", current.id),
+          ] : []),
+        ]);
+      } catch (error) {
+        if (error.message === "CONFLICT") throw new HttpError(409, "该用户名无法注册，请换一个名称");
+        throw error;
+      }
+    };
+    if (share) await rooms.lock(share.room_id, createAccount);
+    else await createAccount();
+    return { ...(await startSession(user, reply)), ...(share ? { roomId: share.room_id } : {}) };
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
