@@ -150,6 +150,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
             ready.current = false;
             setState("connecting");
             const url = new URL(`/api/rooms/${roomId}/events`, window.location.origin);
+            url.searchParams.set("v", "2");
             url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
             socket = new WebSocket(url);
             const snapshot = new Map<string, SharedNode>();
@@ -192,7 +193,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
                     canonical.current.clear(); drafts.current.clear(); pendingRequest.current = null;
                     canonicalEdges.current.clear(); setEdges([]);
                     setNodes([]); setOwnPrivateIds(new Set()); setState("denied");
-                    setError("登录、分享或成员权限已改变，请重新连接验证。");
+                    setError(event.reason.includes("刷新") ? event.reason : "登录、分享或成员权限已改变，请重新连接验证。");
                     return;
                 }
                 setState("offline");

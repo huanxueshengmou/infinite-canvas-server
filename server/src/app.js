@@ -12,7 +12,7 @@ import { z, ZodError } from "zod";
 import { getConfig } from "./config.js";
 import { openDatabase } from "./database.js";
 import { loadMasterKey, hashPassword, verifyPassword, token, digest, encrypt } from "./crypto.js";
-import { credentialsSchema, mutationSchema, privateSchema, idSchema, publicNode, publicEdge } from "./schemas.js";
+import { credentialsSchema, mutationSchema, privateSchema, idSchema, publicNode, publicEdge, PROTOCOL_VERSION } from "./schemas.js";
 import { Rooms, HttpError, auditStep } from "./rooms.js";
 import { safeMediaTypes } from "./egress.js";
 import { privateRecord, registerWorkflowRoutes } from "./workflow-routes.js";
@@ -86,6 +86,7 @@ export async function createApp(options = {}) {
     if (["/api/meta", "/api/auth/login", "/api/auth/register", "/health"].includes(pathname)) return;
     request.session = await sessionFromCookie(request.headers.cookie);
     if (mutating && request.headers["x-csrf-token"] !== request.session.csrf) throw new HttpError(403, "安全验证已失效，请刷新页面");
+    if (mutating && /^\/api\/rooms\/[^/]+\/(operations|private\/[^/]+(?:\/(run|publish))?)$/.test(request.routeOptions.url || pathname) && request.headers["x-canvas-protocol"] !== PROTOCOL_VERSION) throw new HttpError(409, "协作服务已更新，请刷新网页后继续；本次修改未保存");
   });
   app.addHook("preHandler", async (request) => {
     // Recheck after reading a body: a slow upload cannot retain an expired/login-revoked session.
@@ -129,6 +130,7 @@ export async function createApp(options = {}) {
     return { status: "ok" };
   });
   app.get("/api/meta", async () => ({
+    protocolVersion: PROTOCOL_VERSION,
     maxRoomConnections: config.MAX_ROOM_CONNECTIONS, maxSyncBytes: config.MAX_SYNC_BYTES,
     maxFileBytes: await uploadLimit(), syncBatchMs: config.SYNC_BATCH_MS,
     shareTtlMs: config.SHARE_TTL_MS, apiTimeoutMs: config.API_TIMEOUT_MS,
@@ -417,11 +419,12 @@ export async function createApp(options = {}) {
     socket.on("error", () => {});
     try {
       if (request.headers.origin !== config.APP_ORIGIN) throw new HttpError(403, "Origin rejected");
-      const match = /^\/api\/rooms\/([a-f0-9-]+)\/events$/.exec(request.url || "");
+      const eventUrl = new URL(request.url || "", config.APP_ORIGIN);
+      const match = /^\/api\/rooms\/([a-f0-9-]+)\/events$/.exec(eventUrl.pathname);
       if (!match) throw new HttpError(404, "Not found");
       idSchema.parse(match[1]);
       const session = await sessionFromCookie(request.headers.cookie);
-      await rooms.connect(request, socket, head, session, match[1]);
+      await rooms.connect(request, socket, head, session, match[1], eventUrl.searchParams.get("v"));
     } catch (error) {
       if (!socket.destroyed) socket.end(`HTTP/1.1 ${error.statusCode || 400} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     }

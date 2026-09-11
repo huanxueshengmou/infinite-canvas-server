@@ -4,8 +4,51 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { once } from "node:events";
+import { WebSocket } from "ws";
 import { fixture, textNode, privateNode, privateData } from "./helpers.js";
 import { resolveTarget, isPublicAddress } from "../src/egress.js";
+
+test("outdated clients cannot overwrite workflow data or receive incompatible snapshots", async (t) => {
+  let providerCalls = 0;
+  const f = await fixture(t, {}, { executeRequest: async () => { providerCalls++; return { status: 200, text: "result" }; } });
+  const owner = await f.login(await f.user("owner"));
+  const room = await f.room(owner), node = privateNode();
+  assert.equal((await f.send(room.id, owner, [{ type: "create", node }])).status, 200);
+  assert.equal((await f.request("GET", "/api/meta")).body.protocolVersion, "2");
+  const privatePath = `/api/rooms/${room.id}/private/${node.id}`;
+  const before = (await f.request("GET", privatePath, undefined, owner)).body;
+  const writes = [
+    ["POST", `/api/rooms/${room.id}/operations`, { operationId: randomUUID(), operations: [{ type: "delete", id: node.id, version: 1 }] }],
+    ["PUT", privatePath, { version: 1, data: privateData("obsolete-client-key") }],
+    ["POST", `${privatePath}/run`, { version: 1 }],
+    ["POST", `${privatePath}/publish`, {}],
+  ];
+  for (const version of [undefined, "1", "999"]) {
+    for (const [method, url, payload] of writes) {
+      const headers = { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf };
+      if (version !== undefined) headers["x-canvas-protocol"] = version;
+      const response = await f.app.inject({ method, url, payload, headers });
+      assert.equal(response.statusCode, 409, `${method} ${url} protocol=${version}`);
+      assert.match(response.json().error, /刷新网页.*未保存/);
+    }
+  }
+  assert.deepEqual((await f.request("GET", privatePath, undefined, owner)).body, before);
+  assert.equal((await f.request("GET", `/api/rooms/${room.id}`, undefined, owner)).body.revision, 1);
+  assert.equal(providerCalls, 0);
+  for (const query of ["", "?v=1", "?v=999"]) {
+    const ws = new WebSocket(`ws://127.0.0.1:${f.port}/api/rooms/${room.id}/events${query}`, { origin: f.config.APP_ORIGIN, headers: { cookie: owner.cookie } });
+    const events = [];
+    ws.on("message", (data) => events.push(data.toString()));
+    const [code, reason] = await once(ws, "close");
+    assert.equal(code, 4001);
+    assert.match(reason.toString(), /刷新网页/);
+    assert.deepEqual(events, []);
+  }
+  const current = f.socket(room.id, owner);
+  await current.ready;
+  assert.ok(current.events.some((event) => event.type === "snapshot-node" && event.node.id === node.id));
+  current.ws.close();
+});
 
 test("sessions require origin and CSRF; invitations, views and mutations are authorized", async (t) => {
   const f = await fixture(t);
@@ -90,7 +133,7 @@ test("optimistic versions and idempotent receipts prevent lost or duplicate writ
   assert.equal(snapshot.nodes[0].title, node.title);
   assert.equal(snapshot.nodes[0].version, 2);
   assert.equal(snapshot.revision, 2);
-  const overLimit = await f.app.inject({ method: "POST", url: `/api/rooms/${room.id}/operations`, headers: { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf, "content-type": "application/json" }, payload: JSON.stringify({ content: "x".repeat(f.config.MAX_SYNC_BYTES) }) });
+  const overLimit = await f.app.inject({ method: "POST", url: `/api/rooms/${room.id}/operations`, headers: { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf, "x-canvas-protocol": "2", "content-type": "application/json" }, payload: JSON.stringify({ content: "x".repeat(f.config.MAX_SYNC_BYTES) }) });
   assert.equal(overLimit.statusCode, 413);
 });
 

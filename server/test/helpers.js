@@ -22,7 +22,7 @@ export async function fixture(t, overrides = {}, options = {}) {
     return { id, username, password };
   };
   const request = async (method, path, body, auth, extraHeaders = {}) => {
-    const headers = { origin: config.APP_ORIGIN, ...extraHeaders };
+    const headers = { origin: config.APP_ORIGIN, "x-canvas-protocol": "2", ...extraHeaders };
     if (auth) { headers.cookie = auth.cookie; headers["x-csrf-token"] = auth.csrf; }
     const response = await app.inject({ method, url: path, payload: body, headers });
     return { response, status: response.statusCode, body: response.headers["content-type"]?.includes("application/json") ? response.json() : response.body };
@@ -37,7 +37,7 @@ export async function fixture(t, overrides = {}, options = {}) {
   const joinRoom = (invitation, auth) => request("POST", "/api/shares/join", { token: invitation.token }, auth);
   const send = (roomId, auth, operations, operationId = randomUUID()) => request("POST", `/api/rooms/${roomId}/operations`, { operationId, operations }, auth);
   const socket = (roomId, auth, origin = config.APP_ORIGIN) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rooms/${roomId}/events`, { origin, headers: auth ? { cookie: auth.cookie } : {} });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rooms/${roomId}/events?v=2`, { origin, headers: auth ? { cookie: auth.cookie } : {} });
     const events = [];
     ws.on("message", (data) => events.push(JSON.parse(data.toString())));
     const ready = new Promise((resolve, reject) => {

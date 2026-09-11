@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const PROTOCOL_VERSION = "2";
+
 export const idSchema = z.string().uuid();
 export const credentialsSchema = z.object({
   username: z.string().trim().min(1).regex(/^[\p{L}\p{N}_.@-]+$/u),

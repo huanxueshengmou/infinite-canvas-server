@@ -34,7 +34,7 @@ try {
   const sessions = [];
   const http = async (method, path, body, index = 0) => {
     const auth = sessions[index];
-    const response = await fetch(base + path, { method, headers: { origin, "Content-Type": "application/json",
+    const response = await fetch(base + path, { method, headers: { origin, "Content-Type": "application/json", "X-Canvas-Protocol": "2",
       "X-Forwarded-For": `198.51.100.${index + 1}`, ...(auth ? { cookie: auth.cookie, "X-CSRF-Token": auth.csrf } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
     const value = await response.json();
     assert.equal(response.status, 200, `${method} ${path}: ${JSON.stringify(value)}`);
@@ -51,7 +51,7 @@ try {
   let leaked = false;
   const states = [];
   await Promise.all(sessions.map((session, i) => new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${ready.port}/api/rooms/${room.id}/events`, { origin, headers: { cookie: session.cookie } });
+    const ws = new WebSocket(`ws://127.0.0.1:${ready.port}/api/rooms/${room.id}/events?v=2`, { origin, headers: { cookie: session.cookie } });
     sockets.push(ws);
     const state = { revision: 0, nodes: new Map(), cursors: [], gaps: 0 }; states[i] = state;
     ws.on("error", reject);

@@ -51,6 +51,7 @@ export const setCollaborationSession = (value: CollaborationSession | null) => {
 
 export async function collaborationApi<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
+    headers.set("X-Canvas-Protocol", "2");
     if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
     if (session && init.method && !["GET", "HEAD"].includes(init.method)) headers.set("X-CSRF-Token", session.csrf);
     const response = await fetch(`/api${path}`, { ...init, headers, credentials: "same-origin", cache: "no-store" });

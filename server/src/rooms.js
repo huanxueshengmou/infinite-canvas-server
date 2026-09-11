@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { digest, encrypt } from "./crypto.js";
-import { publicNode, publicEdge, cursorSchema } from "./schemas.js";
+import { publicNode, publicEdge, cursorSchema, PROTOCOL_VERSION } from "./schemas.js";
 import { assertEdgeOwner, validateGraph } from "./graph.js";
 
 export class HttpError extends Error {
@@ -219,7 +219,7 @@ export class Rooms {
     this.broadcast(roomId, { type: "presence", count: new Set([...sockets].map((socket) => socket.userId)).size });
   }
 
-  async connect(request, socket, head, session, roomId) {
+  async connect(request, socket, head, session, roomId, protocolVersion) {
     return this.lock(roomId, async () => {
       const access = await this.access(roomId, session.user.id);
       const clients = this.clients.get(roomId) || new Set();
@@ -254,6 +254,7 @@ export class Rooms {
         this.cursorRooms.add(roomId);
         this.presence(roomId);
       });
+      if (protocolVersion !== PROTOCOL_VERSION) { ws.close(4001, "协作服务已更新，请刷新网页"); return; }
       // Stream the initial snapshot, allowing arbitrarily sized rooms without one giant frame.
       const send = (value) => new Promise((resolve, reject) => {
         if (ws.readyState !== WebSocket.OPEN) return reject(new Error("Socket closed during snapshot"));
