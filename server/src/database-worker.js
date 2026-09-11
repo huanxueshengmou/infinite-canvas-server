@@ -1,13 +1,21 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { DatabaseSync, backup } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import { chmod } from "node:fs/promises";
 
 const db = new DatabaseSync(workerData.path);
 const storageVersion = db.prepare("PRAGMA user_version").get().user_version;
-if (![0, 1].includes(storageVersion)) throw new Error("Unknown database version; refusing to alter stored data");
+if (![0, 1, 2].includes(storageVersion)) throw new Error("Unknown database version; refusing to alter stored data");
+if (storageVersion === 1) {
+  const beforeMigration = `${workerData.path}.before-v2-${randomUUID()}.sqlite`;
+  await backup(db, beforeMigration);
+  await chmod(beforeMigration, 0o600);
+}
 db.exec(`
   PRAGMA journal_mode=WAL;
   PRAGMA synchronous=FULL;
   PRAGMA foreign_keys=ON;
+  BEGIN IMMEDIATE;
   CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
     admin INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
@@ -50,11 +58,27 @@ db.exec(`
     target_id TEXT, created_at INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS edges (
+    id TEXT NOT NULL, room_id TEXT NOT NULL REFERENCES rooms(id),
+    source TEXT NOT NULL, source_port TEXT NOT NULL, target TEXT NOT NULL, target_port TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    PRIMARY KEY(room_id,id),
+    UNIQUE(room_id,target,target_port),
+    FOREIGN KEY(room_id,source) REFERENCES nodes(room_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(room_id,target) REFERENCES nodes(room_id,id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS node_templates (
+    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
+    cipher TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
   CREATE INDEX IF NOT EXISTS shares_room ON shares(room_id);
   CREATE INDEX IF NOT EXISTS audit_room ON audit(room_id, id);
-  PRAGMA user_version=1;
+  CREATE INDEX IF NOT EXISTS edges_source ON edges(room_id,source);
+  CREATE INDEX IF NOT EXISTS node_templates_owner ON node_templates(owner_id);
+  PRAGMA user_version=2;
+  COMMIT;
 `);
 
 function execute(step) {

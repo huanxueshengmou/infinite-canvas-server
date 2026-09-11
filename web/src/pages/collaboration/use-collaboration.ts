@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { collaborationApi, CollaborationError, type ChangeEvent, type CollaborationMeta, type NodeFields, type NodeOperation, type SharedNode, type SharedRoom } from "@/services/api/collaboration";
+import { collaborationApi, CollaborationError, type ChangeEvent, type CollaborationMeta, type CollaborationCursor, type NodeFields, type NodeOperation, type SharedNode, type SharedRoom, type SharedEdge } from "@/services/api/collaboration";
 
 type Draft = { base: SharedNode; fields: NodeFields; conflict?: boolean };
 type SyncState = "connecting" | "synced" | "pending" | "offline" | "denied" | "conflict";
@@ -7,10 +7,15 @@ type SyncState = "connecting" | "synced" | "pending" | "offline" | "denied" | "c
 export function useCollaboration(roomId: string, meta: CollaborationMeta, onDenied: () => void) {
     const [room, setRoom] = useState<SharedRoom | null>(null);
     const [nodes, setNodes] = useState<SharedNode[]>([]);
+    const [edges, setEdges] = useState<SharedEdge[]>([]);
+    const canonicalEdges = useRef(new Map<string, SharedEdge>());
     const [ownPrivateIds, setOwnPrivateIds] = useState<Set<string>>(new Set());
     const [state, setState] = useState<SyncState>("connecting");
     const [error, setError] = useState("");
     const [online, setOnline] = useState(0);
+    const [cursors, setCursors] = useState<CollaborationCursor[]>([]);
+    const cursor = useRef<CollaborationCursor["position"] | null>(null);
+    const cursorDirty = useRef(false);
     const [conflicts, setConflicts] = useState<string[]>([]);
     const canonical = useRef(new Map<string, SharedNode>());
     const drafts = useRef(new Map<string, Draft>());
@@ -27,6 +32,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
 
     const render = useCallback(() => {
         setNodes([...canonical.current.values()].map((node) => ({ ...node, ...drafts.current.get(node.id)?.fields })));
+        setEdges([...canonicalEdges.current.values()]);
         const conflicts = [...drafts.current].filter(([, value]) => value.conflict).map(([id]) => id);
         setConflicts(conflicts);
         if (!ready.current) return;
@@ -37,7 +43,9 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         if (event.revision <= revision.current) return;
         if (event.revision !== revision.current + 1) { ready.current = false; reconnect.current(); return; }
         for (const change of event.changes) {
-            if (change.type === "delete") {
+            if (change.type === "edge-upsert") canonicalEdges.current.set(change.edge.id, change.edge);
+            else if (change.type === "edge-delete") canonicalEdges.current.delete(change.id);
+            else if (change.type === "delete") {
                 canonical.current.delete(change.id);
                 const draft = drafts.current.get(change.id);
                 if (draft) draft.conflict = true;
@@ -86,13 +94,14 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
             if (error instanceof CollaborationError && error.status === 409) {
                 pendingRequest.current = null;
                 for (const operation of batch.operations) {
-                    if (operation.type === "create") continue;
+                    if (operation.type !== "update") continue;
                     const draft = drafts.current.get(operation.id);
                     if (draft) draft.conflict = true;
                 }
             } else if (error instanceof CollaborationError && [401, 403, 404].includes(error.status)) {
                 ready.current = false;
                 canonical.current.clear();
+                canonicalEdges.current.clear(); setEdges([]);
                 drafts.current.clear();
                 pendingRequest.current = null;
                 setNodes([]);
@@ -102,7 +111,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
             } else if (error instanceof CollaborationError && error.status < 500) {
                 pendingRequest.current = null;
                 for (const operation of batch.operations) {
-                    if (operation.type !== "create") { const draft = drafts.current.get(operation.id); if (draft) draft.conflict = true; }
+                    if (operation.type === "update") { const draft = drafts.current.get(operation.id); if (draft) draft.conflict = true; }
                 }
             } else { ready.current = false; setState("offline"); }
             setError(error instanceof Error ? error.message : "同步失败，草稿仍保留在当前页面");
@@ -121,6 +130,18 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
         let attempt = 0;
         let generation = 0;
+        let userId = "";
+        const sendCursor = () => {
+            if (cursorDirty.current && ready.current && socket?.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: "cursor", position: cursor.current }));
+                cursorDirty.current = false;
+            }
+        };
+        const cursorTimer = setInterval(sendCursor, meta.syncBatchMs);
+        const hideCursor = () => { cursor.current = null; cursorDirty.current = true; sendCursor(); };
+        const visibilityChanged = () => { if (document.visibilityState === "hidden") hideCursor(); };
+        document.addEventListener("visibilitychange", visibilityChanged);
+        window.addEventListener("blur", hideCursor);
         const connect = () => {
             if (!alive.current) return;
             const currentGeneration = ++generation;
@@ -132,15 +153,18 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
             url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
             socket = new WebSocket(url);
             const snapshot = new Map<string, SharedNode>();
+            const edgeSnapshot = new Map<string, SharedEdge>();
             const owned = new Set<string>();
             socket.onmessage = (message) => {
                 if (!alive.current || currentGeneration !== generation) return;
                 let event;
                 try { event = JSON.parse(message.data); } catch { socket?.close(); return; }
-                if (event.type === "snapshot-start") { setRoom(event.room); readOnly.current = event.room.role === "viewer"; }
+                if (event.type === "snapshot-start") { setRoom(event.room); userId = event.userId; readOnly.current = event.room.role === "viewer"; }
                 else if (event.type === "snapshot-node") { snapshot.set(event.node.id, event.node); if (event.ownPrivate) owned.add(event.node.id); }
+                else if (event.type === "snapshot-edge") edgeSnapshot.set(event.edge.id, event.edge);
                 else if (event.type === "snapshot-end") {
                     canonical.current = snapshot;
+                    canonicalEdges.current = edgeSnapshot;
                     revision.current = event.revision;
                     setOwnPrivateIds(owned);
                     for (const [id, draft] of drafts.current) {
@@ -148,21 +172,25 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
                         if (!current || current.version !== draft.base.version) draft.conflict = true;
                     }
                     ready.current = true;
+                    cursorDirty.current = true;
                     attempt = 0;
                     setError("");
                     render();
                     void flush();
                 } else if (event.type === "changes") apply(event);
                 else if (event.type === "presence") setOnline(event.count);
+                else if (event.type === "cursors") setCursors((event.cursors as CollaborationCursor[]).filter((cursor) => cursor.userId !== userId));
             };
             socket.onclose = async (event) => {
                 if (!alive.current || currentGeneration !== generation) return;
                 ready.current = false;
                 setOnline(0);
+                setCursors([]);
                 // Clear private panels as soon as an authenticated connection disappears.
                 deniedRef.current();
                 if (event.code === 4001) {
                     canonical.current.clear(); drafts.current.clear(); pendingRequest.current = null;
+                    canonicalEdges.current.clear(); setEdges([]);
                     setNodes([]); setOwnPrivateIds(new Set()); setState("denied");
                     setError("登录、分享或成员权限已改变，请重新连接验证。");
                     return;
@@ -172,6 +200,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
                 catch (error) {
                     if (error instanceof CollaborationError && [401, 403, 404].includes(error.status)) {
                         canonical.current.clear(); drafts.current.clear(); setNodes([]); setOwnPrivateIds(new Set());
+                        canonicalEdges.current.clear(); setEdges([]);
                         setState("denied"); setError(error.message); return;
                     }
                 }
@@ -190,8 +219,12 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
             generation++;
             if (timer.current) clearTimeout(timer.current);
             if (reconnectTimer) clearTimeout(reconnectTimer);
+            clearInterval(cursorTimer);
+            document.removeEventListener("visibilitychange", visibilityChanged);
+            window.removeEventListener("blur", hideCursor);
             socket?.close();
             canonical.current.clear(); drafts.current.clear(); pendingRequest.current = null;
+            canonicalEdges.current.clear();
             window.removeEventListener("beforeunload", warn);
         };
     }, [apply, flush, meta.apiTimeoutMs, meta.syncBatchMs, render, roomId]);
@@ -223,6 +256,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         render();
         void flush();
     };
-    return { room, nodes, ownPrivateIds, state, error, online, conflicts, edit, mutate, reconnect: () => reconnect.current(),
+    const setCursor = (position: CollaborationCursor["position"] | null) => { cursor.current = position; cursorDirty.current = true; };
+    return { room, nodes, edges, ownPrivateIds, state, error, online, cursors, setCursor, conflicts, edit, mutate, reconnect: () => reconnect.current(),
         resolveConflict, getDraft: (id: string) => drafts.current.get(id), canEdit: room?.role !== "viewer" && !["connecting", "denied"].includes(state) };
 }

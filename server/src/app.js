@@ -5,17 +5,18 @@ import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import serveStatic from "@fastify/static";
 import { randomUUID } from "node:crypto";
-import { stat, mkdir } from "node:fs/promises";
+import { stat, mkdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { z, ZodError } from "zod";
 import { getConfig } from "./config.js";
 import { openDatabase } from "./database.js";
-import { loadMasterKey, hashPassword, verifyPassword, token, digest, encrypt, decrypt } from "./crypto.js";
-import { credentialsSchema, mutationSchema, privateSchema, idSchema, publicNode } from "./schemas.js";
+import { loadMasterKey, hashPassword, verifyPassword, token, digest, encrypt } from "./crypto.js";
+import { credentialsSchema, mutationSchema, privateSchema, idSchema, publicNode, publicEdge } from "./schemas.js";
 import { Rooms, HttpError, auditStep } from "./rooms.js";
-import { executePrivateRequest } from "./egress.js";
-import { backupDatabase, checkStorage, saveEncryptedFile, readEncryptedFile } from "./storage.js";
+import { safeMediaTypes } from "./egress.js";
+import { privateRecord, registerWorkflowRoutes } from "./workflow-routes.js";
+import { backupDatabase, checkStorage, clearDownloadCache, saveEncryptedFile, readEncryptedFile } from "./storage.js";
 
 export async function createApp(options = {}) {
   const config = options.config || getConfig();
@@ -23,6 +24,7 @@ export async function createApp(options = {}) {
   const databasePath = join(config.DATA_DIR, "canvas.sqlite");
   const databaseExists = await stat(databasePath).then(() => true, (error) => { if (error.code === "ENOENT") return false; throw error; });
   const key = await loadMasterKey(config.MASTER_KEY_FILE, !databaseExists);
+  await clearDownloadCache(config);
   const db = await openDatabase(databasePath);
   const rooms = new Rooms(db, key, config);
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: config.MAX_SYNC_BYTES,
@@ -110,6 +112,10 @@ export async function createApp(options = {}) {
     }
   };
   const admin = (request) => { if (!request.session.user.admin) throw new HttpError(403, "需要管理员权限"); };
+  const uploadLimit = async () => {
+    const setting = await db.get("SELECT value FROM settings WHERE key='max_file_bytes'");
+    return setting ? z.number().int().positive().parse(JSON.parse(setting.value)) : config.MAX_FILE_BYTES;
+  };
   const validateRoom = (request) => idSchema.parse(request.params.roomId);
   const backup = () => {
     if (backupActive) return backupActive;
@@ -124,7 +130,7 @@ export async function createApp(options = {}) {
   });
   app.get("/api/meta", async () => ({
     maxRoomConnections: config.MAX_ROOM_CONNECTIONS, maxSyncBytes: config.MAX_SYNC_BYTES,
-    maxFileBytes: config.MAX_FILE_BYTES, syncBatchMs: config.SYNC_BATCH_MS,
+    maxFileBytes: await uploadLimit(), syncBatchMs: config.SYNC_BATCH_MS,
     shareTtlMs: config.SHARE_TTL_MS, apiTimeoutMs: config.API_TIMEOUT_MS,
   }));
   app.get("/api/auth/session", async (request) => ({ user: request.session.user, csrf: request.session.csrf, expiresAt: request.session.expiresAt }));
@@ -226,8 +232,9 @@ export async function createApp(options = {}) {
     return rooms.lock(roomId, async () => {
       const access = await rooms.access(roomId, request.session.user.id);
       const nodes = await db.all("SELECT id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId]);
+      const edges = await db.all("SELECT * FROM edges WHERE room_id=?", [roomId]);
       return { id: roomId, title: access.title, role: access.role, revision: access.revision,
-        nodes: nodes.map(publicNode), ownPrivateIds: nodes.filter((row) => row.visibility === "private" && row.owner_id === request.session.user.id).map((row) => row.id) };
+        nodes: nodes.map(publicNode), edges: edges.map(publicEdge), ownPrivateIds: nodes.filter((row) => row.visibility === "private" && row.owner_id === request.session.user.id).map((row) => row.id) };
     });
   });
   app.post("/api/rooms/:roomId/operations", { config: writeRate }, async (request) => {
@@ -306,7 +313,7 @@ export async function createApp(options = {}) {
     const context = nodeContext(request);
     return rooms.lock(request.params.roomId, async () => {
       const row = await rooms.privateNode(request.params.roomId, request.params.nodeId, request.session.user.id);
-      return { data: decrypt(key, row.private_cipher, context), version: row.private_version, result: row.result_cipher ? decrypt(key, row.result_cipher, `${context}:result`) : null };
+      return privateRecord(row, key, context);
     });
   });
   app.put("/api/rooms/:roomId/private/:nodeId", { config: writeRate }, async (request) => {
@@ -323,62 +330,70 @@ export async function createApp(options = {}) {
       return { version: row.private_version + 1 };
     });
   });
-  app.post("/api/rooms/:roomId/private/:nodeId/run", { config: writeRate }, async (request, reply) => runIO(async () => {
-    const context = nodeContext(request);
-    const { version } = z.object({ version: z.number().int().positive() }).strict().parse(request.body);
-    const row = await rooms.privateNode(request.params.roomId, request.params.nodeId, request.session.user.id, true);
-    if (version !== row.private_version) throw new HttpError(409, "请先保存并刷新隐私配置");
-    await checkStorage(config);
-    const controller = new AbortController();
-    const abortOnDisconnect = () => { if (!reply.raw.writableEnded) controller.abort(); };
-    reply.raw.once("close", abortOnDisconnect);
-    const active = { controller, roomId: row.room_id, userId: request.session.user.id, sessionHash: request.session.hash };
-    rooms.runningRequests.add(active);
-    const access = await rooms.access(row.room_id, request.session.user.id);
-    const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(config.API_TIMEOUT_MS, request.session.expiresAt - Date.now(), access.accessUntil - Date.now())));
-    timer.unref();
-    try {
-      const storedHosts = await db.get("SELECT value FROM settings WHERE key='api_hosts'");
-      const runtimeConfig = { ...config, allowedHosts: storedHosts ? JSON.parse(storedHosts.value) : config.allowedHosts };
-      const data = decrypt(key, row.private_cipher, context);
-      const result = await (options.executeRequest || executePrivateRequest)(data.request, runtimeConfig, controller.signal);
-      return await rooms.lock(row.room_id, async () => {
-        if (controller.signal.aborted || request.session.expiresAt <= Date.now() || !(await db.get("SELECT hash FROM sessions WHERE hash=?", [request.session.hash]))) throw new HttpError(401, "请求已取消或登录已过期");
-        const current = await rooms.privateNode(row.room_id, row.id, request.session.user.id, true);
-        if (current.private_version !== version) throw new HttpError(409, "请求期间配置已改变，未覆盖现有结果");
-        await db.transaction([
-          { sql: "UPDATE nodes SET result_cipher=? WHERE room_id=? AND id=?", params: [encrypt(key, result, `${context}:result`), row.room_id, row.id] },
-          auditStep(request.session.user.id, row.room_id, "private.run", row.id),
-        ]);
-        return { result };
-      });
-    } finally { clearTimeout(timer); rooms.runningRequests.delete(active); reply.raw.off("close", abortOnDisconnect); }
-  }));
+  registerWorkflowRoutes(app, { runIO, writeRate, sessionFromCookie, uploadLimit, executeRequest: options.executeRequest, openMedia: options.openMedia });
 
   app.post("/api/rooms/:roomId/files", { config: writeRate }, async (request) => runIO(async () => {
     const roomId = validateRoom(request);
     rooms.assertEditor(await rooms.access(roomId, request.session.user.id));
-    const part = await request.file();
+    const part = await request.file({ limits: { fileSize: await uploadLimit() } });
     if (!part) throw new HttpError(400, "请选择一个文件");
     const id = randomUUID();
     const size = await saveEncryptedFile(part.file, id, key, config);
-    const mime = ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/mpeg", "video/mp4"].includes(part.mimetype) ? part.mimetype : "application/octet-stream";
-    await rooms.lock(roomId, async () => {
-      rooms.assertEditor(await rooms.access(roomId, request.session.user.id));
-      await db.run("INSERT INTO files(id,room_id,owner_id,mime,size,created_at) VALUES(?,?,?,?,?,?)", [id, roomId, request.session.user.id, mime, size, Date.now()]);
-    });
+    const mime = safeMediaTypes.includes(part.mimetype) ? part.mimetype : "application/octet-stream";
+    try {
+      await rooms.lock(roomId, async () => {
+        await sessionFromCookie(request.headers.cookie);
+        rooms.assertEditor(await rooms.access(roomId, request.session.user.id));
+        await db.run("INSERT INTO files(id,room_id,owner_id,mime,size,created_at) VALUES(?,?,?,?,?,?)", [id, roomId, request.session.user.id, mime, size, Date.now()]);
+      });
+    } catch (error) {
+      await unlink(join(config.FILES_DIR, `${id}.enc`)).catch(() => {});
+      throw error;
+    }
     return { id, mime, size };
   }));
   app.get("/api/rooms/:roomId/files/:fileId", async (request, reply) => runIO(async () => {
     const roomId = validateRoom(request), id = idSchema.parse(request.params.fileId);
+    await sessionFromCookie(request.headers.cookie);
     await rooms.access(roomId, request.session.user.id);
     const file = await db.get("SELECT * FROM files WHERE room_id=? AND id=?", [roomId, id]);
     if (!file) throw new HttpError(404, "文件不存在");
-    const data = await readEncryptedFile(id, key, config);
-    await rooms.access(roomId, request.session.user.id);
-    reply.type(file.mime).header("Content-Disposition", `${file.mime.startsWith("image/") ? "inline" : "attachment"}; filename="${id}"`);
-    return reply.send(data);
+    const controller = new AbortController();
+    const active = { controller, roomId, userId: request.session.user.id, sessionHash: request.session.hash };
+    const abort = () => controller.abort();
+    reply.raw.once("close", abort);
+    rooms.runningRequests.add(active);
+    let data;
+    try {
+      if (reply.raw.destroyed) controller.abort();
+      data = await readEncryptedFile(id, key, config, file.size, controller.signal);
+      await sessionFromCookie(request.headers.cookie);
+      const access = await rooms.access(roomId, request.session.user.id);
+      controller.signal.throwIfAborted();
+      const timer = setTimeout(abort, Math.max(1, Math.min(request.session.expiresAt, access.accessUntil) - Date.now()));
+      controller.signal.addEventListener("abort", () => data.stream.destroy(), { once: true });
+      try {
+        reply.type(file.mime).header("Content-Length", file.size).header("Content-Disposition", `${safeMediaTypes.includes(file.mime) ? "inline" : "attachment"}; filename="${id}"`);
+        await reply.send(data.stream);
+        return reply;
+      } finally { clearTimeout(timer); }
+    } finally {
+      if (data) await data.cleanup();
+      rooms.runningRequests.delete(active);
+      reply.raw.off("close", abort);
+    }
   }, true));
+
+  app.get("/api/admin/settings", async (request) => { admin(request); return { maxFileBytes: await uploadLimit() }; });
+  app.put("/api/admin/settings", { config: writeRate }, async (request) => {
+    admin(request);
+    const input = z.object({ maxFileBytes: z.number().int().positive().multipleOf(1048576) }).strict().parse(request.body);
+    await db.transaction([
+      { sql: "INSERT INTO settings(key,value) VALUES('max_file_bytes',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params: [JSON.stringify(input.maxFileBytes)] },
+      auditStep(request.session.user.id, null, "settings.upload-limit"),
+    ]);
+    return input;
+  });
 
   app.get("/api/admin/status", async (request) => {
     admin(request);

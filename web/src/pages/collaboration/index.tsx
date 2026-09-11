@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Form, Input, Modal, Space } from "antd";
+import { Alert, App, Button, Form, Input, InputNumber, Modal, Space } from "antd";
 import { LockKeyhole, LogOut, Plus, Users } from "lucide-react";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -35,6 +35,7 @@ export default function CollaborationPage() {
     const [adminOpen, setAdminOpen] = useState(false);
     const [passwordOpen, setPasswordOpen] = useState(false);
     const [hosts, setHosts] = useState("");
+    const [uploadMiB, setUploadMiB] = useState<number | null>(null);
     const [adminStatus, setAdminStatus] = useState<{ lastBackup: { createdAt: string } | null; backupError: string | null } | null>(null);
 
     const acceptSession = (value: CollaborationSession | null) => { setSession(value); setCollaborationSession(value); };
@@ -89,8 +90,8 @@ export default function CollaborationPage() {
     };
     const openAdmin = async () => {
         try {
-            const [providers, status] = await Promise.all([collaborationApi<{ hosts: string[] }>("/admin/providers"), collaborationApi<{ lastBackup: { createdAt: string } | null; backupError: string | null }>("/admin/status")]);
-            setHosts(providers.hosts.join("\n")); setAdminStatus(status); setAdminOpen(true);
+            const [providers, status, settings] = await Promise.all([collaborationApi<{ hosts: string[] }>("/admin/providers"), collaborationApi<{ lastBackup: { createdAt: string } | null; backupError: string | null }>("/admin/status"), collaborationApi<{ maxFileBytes: number }>("/admin/settings")]);
+            setHosts(providers.hosts.join("\n")); setAdminStatus(status); setUploadMiB(settings.maxFileBytes / 1048576); setAdminOpen(true);
         } catch (error) { message.error((error as Error).message); }
     };
 
@@ -134,6 +135,13 @@ export default function CollaborationPage() {
                 }}><Form.Item name="title" label="画布名称" rules={[{ required: true }]}><Input autoFocus /></Form.Item><Button htmlType="submit" type="primary" loading={busy}>创建</Button></Form>
             </Modal>
             <Modal open={adminOpen} title="服务管理" onCancel={() => setAdminOpen(false)} footer={null} destroyOnHidden>
+                <p className="mb-3 text-sm">单文件上传上限（MiB）</p>
+                <Space wrap><InputNumber aria-label="单文件上传上限（MiB）" min={1} precision={0} value={uploadMiB} onChange={setUploadMiB} /><Button disabled={!uploadMiB} loading={busy} onClick={async () => {
+                    setBusy(true);
+                    try { const settings = await collaborationApi<{ maxFileBytes: number }>("/admin/settings", { method: "PUT", body: JSON.stringify({ maxFileBytes: (uploadMiB || 0) * 1048576 }) }); setMeta((current) => current ? { ...current, ...settings } : current); message.success("上传上限已保存"); }
+                    catch (error) { message.error((error as Error).message); } finally { setBusy(false); }
+                }}>保存上传上限</Button></Space>
+                <p className="mb-6 mt-2 text-xs opacity-65">对新上传立即生效，已上传文件仍可下载。</p>
                 <p className="mb-3 text-sm">允许隐私节点访问的 API 域名，每行一个。只填写可信服务商的域名，所有请求仍会检查目标 IP。</p>
                 <Input.TextArea aria-label="允许的 API 域名" value={hosts} onChange={(event) => setHosts(event.target.value)} autoSize={{ minRows: 5 }} placeholder="api.example.com" />
                 <Button className="mt-3" onClick={async () => { try { await collaborationApi("/admin/providers", { method: "PUT", body: JSON.stringify({ hosts: hosts.split(/[\s,]+/).filter(Boolean) }) }); message.success("API 域名已保存"); } catch (error) { message.error((error as Error).message); } }}>保存 API 域名</Button>

@@ -1,8 +1,9 @@
 import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readFile, writeFile, open, unlink, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, open, unlink, stat, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { pipeline } from "node:stream/promises";
+import { compose, Readable, Transform } from "node:stream";
+import { pipeline, finished } from "node:stream/promises";
 import { createGzip, createGunzip } from "node:zlib";
 import { HttpError } from "./rooms.js";
 
@@ -38,14 +39,44 @@ export async function saveEncryptedFile(stream, id, key, config) {
   } finally { await handle.close().catch(() => {}); }
 }
 
-export async function readEncryptedFile(id, key, config) {
+export async function clearDownloadCache(config) {
+  // Only this application's encrypted, disposable download snapshots are removed on startup.
+  for (const name of await readdir(config.DATA_DIR)) {
+    if (/^download-[a-f0-9-]{36}\.enc$/.test(name)) await unlink(join(config.DATA_DIR, name));
+  }
+}
+
+export async function readEncryptedFile(id, key, config, expectedSize, signal) {
   await checkStorage(config);
-  const data = await readFile(join(config.FILES_DIR, `${id}.enc`));
-  const decipher = createDecipheriv("aes-256-gcm", key, data.subarray(0, 12));
-  decipher.setAAD(Buffer.from(`file:${id}`));
-  decipher.setAuthTag(data.subarray(-16));
-  // Authenticate before serving any bytes. Concurrency bounds the memory used by this buffer.
-  return Buffer.concat([decipher.update(data.subarray(12, -16)), decipher.final()]);
+  const handle = await open(join(config.FILES_DIR, `${id}.enc`), "r");
+  const snapshot = join(config.DATA_DIR, `download-${randomUUID()}.enc`);
+  let stream;
+  const cleanup = async () => {
+    if (stream) { stream.destroy(); await finished(stream, { cleanup: true }).catch(() => {}); }
+    await unlink(snapshot).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  };
+  try {
+    const size = (await handle.stat()).size;
+    if (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || size !== expectedSize + 28) throw new HttpError(502, "文件完整性校验失败，未发送内容");
+    const iv = Buffer.alloc(12), tag = Buffer.alloc(16);
+    await handle.read(iv, 0, 12, 0);
+    await handle.read(tag, 0, 16, size - 16);
+    const decipher = () => createDecipheriv("aes-256-gcm", key, iv).setAAD(Buffer.from(`file:${id}`)).setAuthTag(tag);
+    const verifier = decipher();
+    const authenticate = new Transform({
+      transform(chunk, _encoding, callback) { try { verifier.update(chunk); callback(null, chunk); } catch (error) { callback(error); } },
+      flush(callback) { try { verifier.final(); callback(); } catch { callback(new HttpError(502, "文件完整性校验失败，未发送内容")); } },
+    });
+    // Spool only authenticated ciphertext locally. The immutable snapshot prevents a cloud
+    // change between verification and streaming from releasing unverified plaintext.
+    const source = expectedSize ? handle.createReadStream({ start: 12, end: size - 17, autoClose: false }) : Readable.from([]);
+    await pipeline(source, authenticate, createWriteStream(snapshot, { flags: "wx", mode: 0o600 }), { signal });
+    stream = compose(createReadStream(snapshot), decipher());
+    return { stream, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  } finally { await handle.close(); }
 }
 
 export async function backupDatabase(db, key, config) {

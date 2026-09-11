@@ -1,9 +1,10 @@
 export type CollaborationUser = { id: string; username: string; admin: boolean };
 export type CollaborationSession = { user: CollaborationUser; csrf: string; expiresAt: number };
 export type CollaborationRole = "owner" | "editor" | "viewer";
+export type CollaborationCursor = { userId: string; username: string; position: { x: number; y: number } };
 export type SharedNode = {
     id: string;
-    kind: "text" | "image" | "file" | "private";
+    kind: "text" | "image" | "video" | "file" | "custom" | "private";
     position: { x: number; y: number };
     width: number;
     height: number;
@@ -11,20 +12,31 @@ export type SharedNode = {
     content: string;
     fileId: string | null;
     version: number;
+    outputType?: "text" | "json";
 };
+export type InputPort = "input" | "image" | "audio";
+export type SharedEdge = { id: string; source: string; sourcePort: "output"; target: string; targetPort: InputPort; version: number };
 export type SharedRoom = { id: string; title: string; role: CollaborationRole; revision?: number };
 export type PrivateData = {
     title: string;
     note: string;
+    category: "request" | "image" | "video" | "llm";
+    fields: { name: string; label: string; type: "text" | "number" | "boolean"; value: string | number | boolean }[];
     request: { url: string; method: "GET" | "POST"; apiKey: string; header: "Authorization" | "x-api-key"; body: string };
+    poll?: { url: string; taskIdPath: string };
 };
-export type PrivateRecord = { data: PrivateData; version: number; result: { status: number; text: string } | null };
-export type NodeFields = Partial<Pick<SharedNode, "position" | "width" | "height" | "title" | "content" | "fileId">>;
+export type ResultMedia = { path: string; type: "image" | "video" | "audio"; base64?: boolean };
+export type PrivateRecord = { data: PrivateData; version: number; result: { id: string; status: number; text: string; taskId?: string; configVersion?: number; inputRevision?: number } | null; media: ResultMedia[] };
+export type NodeTemplate = { id: string; name: string; kind: "custom" | "private"; content: string; outputType: "text" | "json"; privateData?: PrivateData; version: number; builtIn: boolean };
+export type TemplateInput = Pick<NodeTemplate, "name" | "kind" | "content" | "outputType" | "privateData">;
+export type NodeFields = Partial<Pick<SharedNode, "position" | "width" | "height" | "title" | "content" | "fileId" | "outputType">>;
 export type NodeOperation =
     | { type: "create"; node: Omit<SharedNode, "version"> & { privateData?: PrivateData } }
     | { type: "update"; id: string; version: number; fields: NodeFields }
-    | { type: "delete"; id: string; version: number };
-export type ChangeEvent = { type: "changes"; operationId: string; revision: number; changes: ({ type: "upsert"; node: SharedNode } | { type: "delete"; id: string })[] };
+    | { type: "delete"; id: string; version: number }
+    | { type: "connect"; edge: Omit<SharedEdge, "version">; version?: number }
+    | { type: "disconnect"; id: string; version: number };
+export type ChangeEvent = { type: "changes"; operationId: string; revision: number; changes: ({ type: "upsert"; node: SharedNode } | { type: "delete"; id: string } | { type: "edge-upsert"; edge: SharedEdge } | { type: "edge-delete"; id: string })[] };
 export type CollaborationMeta = { maxRoomConnections: number; maxSyncBytes: number; maxFileBytes: number; syncBatchMs: number; shareTtlMs: number; apiTimeoutMs: number };
 
 export class CollaborationError extends Error {
@@ -47,5 +59,5 @@ export async function collaborationApi<T>(path: string, init: RequestInit = {}):
     return data as T;
 }
 
-export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", request: { url: "", method: "POST", apiKey: "", header: "Authorization", body: '{\n  "model": "",\n  "messages": []\n}' } });
+export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", category: "request", fields: [], request: { url: "", method: "POST", apiKey: "", header: "Authorization", body: '{\n  "prompt": "{{input.text}}"\n}' } });
 export const collaborationFileUrl = (roomId: string, id: string) => `/api/rooms/${roomId}/files/${id}`;

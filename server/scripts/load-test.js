@@ -53,16 +53,17 @@ try {
   await Promise.all(sessions.map((session, i) => new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${ready.port}/api/rooms/${room.id}/events`, { origin, headers: { cookie: session.cookie } });
     sockets.push(ws);
-    const state = { revision: 0, nodes: new Map(), gaps: 0 }; states[i] = state;
+    const state = { revision: 0, nodes: new Map(), cursors: [], gaps: 0 }; states[i] = state;
     ws.on("error", reject);
     ws.on("message", (buffer) => {
       const text = buffer.toString(); if (text.includes(privateCanary)) leaked = true;
       const event = JSON.parse(text);
       if (event.type === "snapshot-node") state.nodes.set(event.node.id, event.node);
       if (event.type === "snapshot-end") { state.revision = event.revision; resolve(); }
+      if (event.type === "cursors") state.cursors = event.cursors;
       if (event.type === "changes") {
         if (event.revision !== state.revision + 1) state.gaps++;
-        for (const change of event.changes) { if (change.type === "delete") state.nodes.delete(change.id); else state.nodes.set(change.node.id, change.node); }
+        for (const change of event.changes) { if (change.type === "delete") state.nodes.delete(change.id); else if (change.type === "upsert") state.nodes.set(change.node.id, change.node); }
         state.revision = event.revision;
       }
     });
@@ -79,6 +80,7 @@ try {
   let peakRss = before.memory.rss;
   const start = performance.now();
   for (let round = 0; round < rounds; round++) {
+    sockets.forEach((socket, i) => socket.send(JSON.stringify({ type: "cursor", position: { x: i * 320 + round, y: 250 + round } })));
     await Promise.all(nodes.map(async (node, i) => {
       const started = performance.now();
       await http("POST", `/api/rooms/${room.id}/operations`, { operationId: randomUUID(), operations: [{ type: "update", id: node.id, version: round + 1, fields: { position: { x: i * 320 + round, y: 250 + round }, content: `User ${i}: round ${round}` } }] }, i);
@@ -94,12 +96,14 @@ try {
   const elapsed = performance.now() - start;
   const expectedRevision = 1 + clientsCount + clientsCount * rounds;
   const deadline = Date.now() + 120000;
-  while (states.some((state) => state.revision !== expectedRevision) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 150));
+  while (states.some((state) => state.revision !== expectedRevision || state.cursors.length !== clientsCount || state.cursors.some((cursor) => cursor.position.y !== 250 + rounds - 1)) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(leaked, false);
   for (const state of states) {
     assert.equal(state.revision, expectedRevision);
     assert.equal(state.gaps, 0);
     assert.equal(state.nodes.get(privateId).title, "隐私节点");
+    assert.equal(state.cursors.length, clientsCount);
+    for (let i = 0; i < users.length; i++) assert.deepEqual(state.cursors.find((cursor) => cursor.userId === users[i].id), { userId: users[i].id, username: users[i].username, position: { x: i * 320 + rounds - 1, y: 250 + rounds - 1 } });
     for (let i = 0; i < nodes.length; i++) assert.equal(state.nodes.get(nodes[i].id).content, `User ${i}: round ${rounds - 1}`);
   }
   const { value: after } = await http("GET", "/api/admin/status");
@@ -108,7 +112,7 @@ try {
   const percentile = (p) => +latencies[Math.floor((latencies.length - 1) * p)].toFixed(2);
   console.log(JSON.stringify({ result: "PASS", clients: clientsCount, writes: latencies.length, elapsedSeconds: +(elapsed / 1000).toFixed(2),
     acknowledgementMs: { p50: percentile(0.5), p95: percentile(0.95), p99: percentile(0.99), max: +latencies.at(-1).toFixed(2) },
-    serverPeakRssMiB: +(peakRss / 1048576).toFixed(1), eventLoopDelayMs: after.eventLoopDelayMs, convergence: "all clients identical", privatePayloadLeaked: leaked }, null, 2));
+    serverPeakRssMiB: +(peakRss / 1048576).toFixed(1), eventLoopDelayMs: after.eventLoopDelayMs, convergence: "all clients identical", namedCursors: clientsCount, privatePayloadLeaked: leaked }, null, 2));
 } finally {
   for (const socket of sockets) socket.terminate();
   child.kill("SIGTERM");

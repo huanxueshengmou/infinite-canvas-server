@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { Readable } from "node:stream";
+import { buffer } from "node:stream/consumers";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { fixture, textNode, storageRoot } from "./helpers.js";
-import { backupDatabase, restoreBackup, saveEncryptedFile, readEncryptedFile } from "../src/storage.js";
+import { backupDatabase, restoreBackup, saveEncryptedFile, readEncryptedFile, clearDownloadCache } from "../src/storage.js";
 import { openDatabase } from "../src/database.js";
 
 test("cloud archives are encrypted, checked and restorable without overwriting files", async (t) => {
@@ -44,12 +45,35 @@ test("files are streamed encrypted, authenticated before serving, and denied on 
   const file = join(config.FILES_DIR, `${id}.enc`);
   const encrypted = await readFile(file);
   assert.ok(!encrypted.includes(content));
-  assert.deepEqual(await readEncryptedFile(id, f.app.context.key, config), content);
+  const download = await readEncryptedFile(id, f.app.context.key, config, content.length);
+  const snapshots = (await readdir(config.DATA_DIR)).filter((name) => name.startsWith("download-"));
+  assert.equal(snapshots.length, 1);
+  assert.deepEqual(await readFile(join(config.DATA_DIR, snapshots[0])), encrypted.subarray(12, -16));
   encrypted[14] ^= 1;
   await writeFile(file, encrypted);
-  await assert.rejects(readEncryptedFile(id, f.app.context.key, config));
+  // Changing the cloud file after authentication cannot change the verified response.
+  try { assert.deepEqual(await buffer(download.stream), content); } finally { await download.cleanup(); }
+  assert.equal((await readdir(config.DATA_DIR)).filter((name) => name.startsWith("download-")).length, 0);
+  await assert.rejects(readEncryptedFile(id, f.app.context.key, config, content.length), /完整性校验失败/);
+  assert.equal((await readdir(config.DATA_DIR)).filter((name) => name.startsWith("download-")).length, 0);
   await writeFile(sentinel, "unavailable");
   await assert.rejects(saveEncryptedFile(Readable.from(content), randomUUID(), f.app.context.key, config), /挂载/);
+});
+
+test("empty files and cancelled downloads clean up only disposable encrypted snapshots", async (t) => {
+  const f = await fixture(t);
+  const id = randomUUID();
+  assert.equal(await saveEncryptedFile(Readable.from([]), id, f.app.context.key, f.config), 0);
+  const empty = await readEncryptedFile(id, f.app.context.key, f.config, 0);
+  try { assert.equal((await buffer(empty.stream)).length, 0); } finally { await empty.cleanup(); }
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(readEncryptedFile(id, f.app.context.key, f.config, 0, controller.signal), { name: "AbortError" });
+  assert.equal((await readdir(f.config.DATA_DIR)).filter((name) => name.startsWith("download-")).length, 0);
+  await writeFile(join(f.config.DATA_DIR, `download-${randomUUID()}.enc`), "discarded encrypted snapshot");
+  const key = await readFile(f.config.MASTER_KEY_FILE);
+  await clearDownloadCache(f.config);
+  assert.deepEqual(await readFile(f.config.MASTER_KEY_FILE), key);
+  assert.equal((await readdir(f.config.DATA_DIR)).filter((name) => name.startsWith("download-")).length, 0);
 });
 
 test("API concurrency uses backpressure without blocking room mutations or health requests", async (t) => {
@@ -59,13 +83,13 @@ test("API concurrency uses backpressure without blocking room mutations or healt
   const f = await fixture(t, {}, { executeRequest: async () => { started++; await gate; return { status: 200, text: "ok" }; } });
   const owner = await f.login(await f.user("owner")), room = await f.room(owner);
   const { privateNode } = await import("./helpers.js");
-  const node = privateNode();
-  await f.send(room.id, owner, [{ type: "create", node }]);
+  const nodes = [privateNode(), privateNode(), privateNode()];
+  await f.send(room.id, owner, nodes.map((node) => ({ type: "create", node })));
   const fileId = randomUUID();
   await saveEncryptedFile(Readable.from("queued-file"), fileId, f.app.context.key, f.config);
   await f.app.context.db.run("INSERT INTO files(id,room_id,owner_id,mime,size,created_at) VALUES(?,?,?,?,?,?)", [fileId, room.id, owner.user.id, "application/octet-stream", 11, Date.now()]);
-  const run = () => f.request("POST", `/api/rooms/${room.id}/private/${node.id}/run`, { version: 1 }, owner);
-  const first = run(), second = run();
+  const run = (index = 2) => f.request("POST", `/api/rooms/${room.id}/private/${nodes[index].id}/run`, { version: 1 }, owner);
+  const first = run(0), second = run(1);
   while (started < 2) await new Promise((resolve) => setImmediate(resolve));
   let downloaded = false;
   const download = f.request("GET", `/api/rooms/${room.id}/files/${fileId}`, undefined, owner).then((result) => { downloaded = true; return result; });

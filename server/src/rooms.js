@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { digest, encrypt } from "./crypto.js";
-import { publicNode } from "./schemas.js";
+import { publicNode, publicEdge, cursorSchema } from "./schemas.js";
+import { assertEdgeOwner, validateGraph } from "./graph.js";
 
 export class HttpError extends Error {
   constructor(statusCode, message, details) {
@@ -24,6 +25,19 @@ export class Rooms {
     this.queues = new Map();
     this.clients = new Map();
     this.runningRequests = new Set();
+    this.cursorRooms = new Set();
+    this.cursorSequence = 0;
+    this.cursorTimer = setInterval(() => {
+      for (const roomId of this.cursorRooms) {
+        const cursors = new Map();
+        for (const socket of this.clients.get(roomId) || []) {
+          if (socket.cursor && socket.readyState === WebSocket.OPEN && (!cursors.has(socket.userId) || cursors.get(socket.userId).sequence < socket.cursor.sequence)) cursors.set(socket.userId, socket.cursor);
+        }
+        this.broadcast(roomId, { type: "cursors", cursors: [...cursors.values()].map(({ sequence, ...cursor }) => cursor) });
+      }
+      this.cursorRooms.clear();
+    }, config.SYNC_BATCH_MS);
+    this.cursorTimer.unref();
     this.wss = new WebSocketServer({ noServer: true, maxPayload: config.MAX_SYNC_BYTES, perMessageDeflate: false });
     this.heartbeat = setInterval(() => {
       for (const clients of this.clients.values()) for (const socket of clients) {
@@ -73,10 +87,11 @@ export class Rooms {
     if (fileId && !(await this.db.get("SELECT id FROM files WHERE id=? AND room_id=?", [fileId, roomId]))) throw new HttpError(400, "文件不属于当前画布");
   }
 
-  async apply(roomId, userId, mutation) {
+  async apply(roomId, userId, mutation, guard) {
     return this.lock(roomId, async () => {
       const access = await this.access(roomId, userId);
       this.assertEditor(access);
+      if (guard) await guard();
       const requestHash = digest(JSON.stringify(mutation));
       const receipt = await this.db.get("SELECT * FROM receipts WHERE room_id=? AND user_id=? AND operation_id=?", [roomId, userId, mutation.operationId]);
       if (receipt) {
@@ -86,7 +101,12 @@ export class Rooms {
       const changes = [];
       const steps = [];
       const seen = new Set();
-      for (const operation of mutation.operations) {
+      const graphChanged = mutation.operations.some((operation) => ["connect", "disconnect", "delete"].includes(operation.type));
+      const nodes = graphChanged ? new Map((await this.db.all("SELECT id,room_id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
+      const edges = graphChanged ? new Map((await this.db.all("SELECT * FROM edges WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
+      const originalEdges = edges ? new Map(edges) : null;
+      const originalNodes = nodes ? new Map(nodes) : null;
+      for (const operation of mutation.operations.filter((operation) => !["connect", "disconnect"].includes(operation.type))) {
         const id = operation.type === "create" ? operation.node.id : operation.id;
         if (seen.has(id)) throw new HttpError(400, "一批操作中不能重复修改同一节点");
         seen.add(id);
@@ -96,14 +116,17 @@ export class Rooms {
           const source = operation.node;
           const isPrivate = source.kind === "private";
           if (isPrivate !== Boolean(source.privateData)) throw new HttpError(400, "隐私数据必须使用隐私节点");
+          if (source.outputType && source.kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
           await this.checkFile(roomId, isPrivate ? null : source.fileId);
           const value = { kind: source.kind, position: source.position, width: source.width, height: source.height,
-            title: isPrivate ? "隐私节点" : source.title, content: isPrivate ? "" : source.content, fileId: isPrivate ? null : source.fileId };
+            title: isPrivate ? "隐私节点" : source.title, content: isPrivate ? "" : source.content, fileId: isPrivate ? null : source.fileId,
+            ...(source.kind === "custom" ? { outputType: source.outputType || "text" } : {}) };
           const row = { id, room_id: roomId, owner_id: userId, visibility: isPrivate ? "private" : "public", version: 1, public_json: JSON.stringify(value) };
           const cipher = isPrivate ? encrypt(this.key, source.privateData, `${roomId}:${id}:${userId}`) : null;
           steps.push({ sql: "INSERT INTO nodes(id,room_id,owner_id,visibility,version,public_json,private_cipher) VALUES(?,?,?,?,?,?,?)",
             params: [id, roomId, userId, row.visibility, 1, row.public_json, cipher] });
           changes.push({ type: "upsert", node: publicNode(row) });
+          nodes?.set(id, row);
         } else {
           if (!existing) throw new HttpError(409, "节点已被删除", { nodeId: id, deleted: true });
           if (existing.visibility === "private" && existing.owner_id !== userId) throw new HttpError(403, "不能修改他人的隐私节点");
@@ -111,16 +134,62 @@ export class Rooms {
           if (operation.type === "delete") {
             steps.push({ sql: "DELETE FROM nodes WHERE room_id=? AND id=? AND version=?", params: [roomId, id, operation.version], expectChanges: 1 });
             changes.push({ type: "delete", id });
+            nodes?.delete(id);
           } else {
             if (existing.visibility === "private" && Object.keys(operation.fields).some((key) => !["position", "width", "height"].includes(key))) throw new HttpError(400, "隐私内容只能经专用接口保存");
             await this.checkFile(roomId, operation.fields.fileId);
+            if (operation.fields.outputType && JSON.parse(existing.public_json).kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
             const value = { ...JSON.parse(existing.public_json), ...operation.fields };
             const row = { ...existing, version: existing.version + 1, public_json: JSON.stringify(value) };
             steps.push({ sql: "UPDATE nodes SET public_json=?,version=? WHERE room_id=? AND id=? AND version=?",
               params: [row.public_json, row.version, roomId, id, operation.version], expectChanges: 1 });
             changes.push({ type: "upsert", node: publicNode(row) });
+            nodes?.set(id, row);
           }
         }
+      }
+      if (graphChanged) {
+        const seenEdges = new Set();
+        for (const operation of mutation.operations.filter((operation) => ["connect", "disconnect"].includes(operation.type))) {
+          const id = operation.type === "connect" ? operation.edge.id : operation.id;
+          if (seenEdges.has(id)) throw new HttpError(400, "一批操作中不能重复修改同一连线");
+          seenEdges.add(id);
+          const existing = originalEdges.get(id);
+          if (existing) {
+            assertEdgeOwner(existing, originalNodes, userId);
+            if (operation.version !== existing.version) throw new HttpError(409, "连线已改变，请刷新后重试");
+          } else if (operation.version || operation.type === "disconnect") throw new HttpError(409, "连线已被删除或不存在");
+          if (operation.type === "disconnect") edges.delete(id);
+          else {
+            const edge = { id, room_id: roomId, source: operation.edge.source, source_port: operation.edge.sourcePort,
+              target: operation.edge.target, target_port: operation.edge.targetPort, version: (existing?.version || 0) + 1 };
+            assertEdgeOwner(edge, nodes, userId);
+            if (!nodes.has(edge.source) || !nodes.has(edge.target)) throw new HttpError(400, "连线节点不属于当前画布或已被删除");
+            if (edge.target_port === "audio" && nodes.get(edge.source).visibility !== "private") {
+              const fileId = JSON.parse(nodes.get(edge.source).public_json).fileId;
+              const file = fileId && await this.db.get("SELECT mime FROM files WHERE room_id=? AND id=?", [roomId, fileId]);
+              if (!file?.mime.startsWith("audio/")) throw new HttpError(400, "音频输入必须连接音频文件");
+            }
+            edges.set(id, edge);
+          }
+        }
+        for (const [id, edge] of edges) if (!nodes.has(edge.source) || !nodes.has(edge.target)) edges.delete(id);
+        validateGraph(edges, nodes);
+        const deletes = [], inserts = [];
+        for (const [id, old] of originalEdges) {
+          const current = edges.get(id);
+          if (!current || current.version !== old.version) {
+            deletes.push({ sql: "DELETE FROM edges WHERE room_id=? AND id=? AND version=?", params: [roomId, id, old.version], expectChanges: 1 });
+            if (!current) changes.push({ type: "edge-delete", id });
+          }
+        }
+        for (const [id, edge] of edges) if (originalEdges.get(id)?.version !== edge.version) {
+          inserts.push({ sql: "INSERT INTO edges(id,room_id,source,source_port,target,target_port,version) VALUES(?,?,?,?,?,?,?)",
+            params: [id, roomId, edge.source, edge.source_port, edge.target, edge.target_port, edge.version] });
+          changes.push({ type: "edge-upsert", edge: publicEdge(edge) });
+        }
+        steps.unshift(...deletes);
+        steps.push(...inserts);
       }
       const result = { type: "changes", operationId: mutation.operationId, revision: access.revision + 1, changes };
       steps.push(
@@ -156,8 +225,10 @@ export class Rooms {
       const clients = this.clients.get(roomId) || new Set();
       if (clients.size >= this.config.MAX_ROOM_CONNECTIONS) throw new HttpError(429, "当前画布在线连接已达上限");
       const rows = await this.db.all("SELECT id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId]);
+      const edges = await this.db.all("SELECT * FROM edges WHERE room_id=?", [roomId]);
       const ws = await new Promise((resolve) => this.wss.handleUpgrade(request, socket, head, resolve));
       ws.userId = session.user.id;
+      ws.username = session.user.username;
       ws.sessionHash = session.hash;
       ws.roomId = roomId;
       ws.alive = true;
@@ -168,11 +239,19 @@ export class Rooms {
       ws.expiry = setTimeout(() => ws.close(4001, "授权已过期"), Math.max(1, expiresAt - Date.now()));
       ws.expiry.unref();
       ws.on("error", () => {});
-      ws.on("message", () => ws.close(1008, "请使用带鉴权的同步接口"));
+      ws.on("message", (data, binary) => {
+        try {
+          if (binary) throw new Error("Binary cursor message");
+          const cursor = cursorSchema.parse(JSON.parse(data.toString()));
+          ws.cursor = cursor.position ? { userId: ws.userId, username: ws.username, position: cursor.position, sequence: ++this.cursorSequence } : null;
+          this.cursorRooms.add(roomId);
+        } catch { ws.close(1008, "无效的鼠标消息，内容修改请使用鉴权接口"); }
+      });
       ws.on("close", () => {
         clearTimeout(ws.expiry);
         clients.delete(ws);
         if (!clients.size) this.clients.delete(roomId);
+        this.cursorRooms.add(roomId);
         this.presence(roomId);
       });
       // Stream the initial snapshot, allowing arbitrarily sized rooms without one giant frame.
@@ -180,10 +259,12 @@ export class Rooms {
         if (ws.readyState !== WebSocket.OPEN) return reject(new Error("Socket closed during snapshot"));
         ws.send(JSON.stringify(value), (error) => error ? reject(error) : resolve());
       });
-      await send({ type: "snapshot-start", room: { id: roomId, title: access.title, revision: access.revision, role: access.role } });
+      await send({ type: "snapshot-start", userId: session.user.id, room: { id: roomId, title: access.title, revision: access.revision, role: access.role } });
       for (const row of rows) await send({ type: "snapshot-node", node: publicNode(row), ownPrivate: row.visibility === "private" && row.owner_id === session.user.id });
+      for (const row of edges) await send({ type: "snapshot-edge", edge: publicEdge(row) });
       await send({ type: "snapshot-end", revision: access.revision });
       this.presence(roomId);
+      this.cursorRooms.add(roomId);
     });
   }
 
@@ -205,6 +286,7 @@ export class Rooms {
 
   async close() {
     clearInterval(this.heartbeat);
+    clearInterval(this.cursorTimer);
     for (const clients of this.clients.values()) for (const socket of clients) socket.terminate();
     for (const request of this.runningRequests) request.controller.abort();
     await Promise.allSettled([...this.queues.values()]);
