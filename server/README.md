@@ -89,6 +89,15 @@ systemctl list-timers infinite-canvas-cert-renew.timer
 docker exec infinite-canvas-app npm run backup
 ```
 
+更新 `deploy/nginx.conf` 后需要重建网关容器，并核对容器内外的文件哈希。单文件 bind mount 可能仍指向旧文件，单独执行 Nginx reload 不能保证新配置生效；大文件上传规则必须在实际入口验证。
+
+```sh
+docker compose -f /opt/infinite-canvas/deploy/compose.yml up -d --no-deps --force-recreate gateway
+docker exec infinite-canvas-gateway nginx -t
+sha256sum /opt/infinite-canvas/deploy/nginx.conf
+docker exec infinite-canvas-gateway sha256sum /etc/nginx/conf.d/default.conf
+```
+
 恢复流程应先在新的本地文件中验证，不能直接覆盖正在运行的主库：
 
 ```sh
