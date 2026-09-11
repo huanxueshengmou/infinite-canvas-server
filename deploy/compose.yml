@@ -1,0 +1,41 @@
+name: infinite-canvas
+services:
+  app:
+    image: infinite-canvas-collaboration:local
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    container_name: infinite-canvas-app
+    network_mode: host
+    env_file: runtime.env
+    restart: unless-stopped
+    read_only: true
+    # The existing FUSE mount only permits UID 0; no host capabilities or Docker socket are exposed.
+    user: "0:0"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    tmpfs: [/tmp]
+    volumes:
+      - /var/lib/infinite-canvas:/data
+      - /root/PDSDrive/团队空间/huanxue/infinite-canvas:/storage
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  gateway:
+    image: nginx:alpine
+    container_name: infinite-canvas-gateway
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/lib/infinite-canvas-acme:/var/www/acme:ro
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

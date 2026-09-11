@@ -1,0 +1,17 @@
+[Unit]
+Description=Infinite Canvas collaboration with mounted cloud storage
+Requires=docker.service mountapp.service
+After=docker.service mountapp.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/infinite-canvas/deploy
+ExecStartPre=/bin/sh -c 'mountpoint -q /root/PDSDrive && test -f /root/PDSDrive/团队空间/huanxue/infinite-canvas/.canvas-storage'
+ExecStart=/usr/bin/docker compose -f /opt/infinite-canvas/deploy/compose.yml up -d --force-recreate
+ExecStop=/usr/bin/docker compose -f /opt/infinite-canvas/deploy/compose.yml stop
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

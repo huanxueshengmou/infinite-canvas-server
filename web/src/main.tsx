@@ -10,7 +10,7 @@ import "@/i18n";
 import { initAnalytics } from "@/lib/analytics";
 import { router } from "@/router";
 
-initAnalytics();
+if (!window.location.pathname.startsWith("/collaboration")) initAnalytics();
 
 document.body.style.fontFamily = '"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif';
 

@@ -8,6 +8,9 @@ docs/node_modules
 docs/out
 web/.next
 web/node_modules
+server/node_modules
+server/data
+deploy/runtime.env
 web/out
 *.log
 .env*

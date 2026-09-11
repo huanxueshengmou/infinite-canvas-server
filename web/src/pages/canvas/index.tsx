@@ -80,6 +80,7 @@ export default function CanvasPage() {
                         <h1 className="mt-3 text-3xl font-semibold">{t("canvas.title")}</h1>
                     </div>
                     <div className="flex items-center gap-2">
+                        <Button onClick={() => { window.location.href = "/collaboration"; }}>多人协作</Button>
                         {selectedIds.length ? (
                             <>
                                 <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `${t("canvas.title")}-${selectedIds.length}`)}>
