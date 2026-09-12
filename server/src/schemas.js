@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { requestSchema } from "./request-config.js";
 
-export const PROTOCOL_VERSION = "3";
+export const PROTOCOL_VERSION = "4";
 
 export const idSchema = z.string().uuid();
 export const credentialsSchema = z.object({
@@ -37,7 +37,7 @@ export const privateSchema = z.object({
 
 export const createNodeSchema = z.object({
   id: idSchema,
-  kind: z.enum(["text", "image", "video", "file", "custom", "private"]),
+  kind: z.enum(["text", "markdown", "image", "video", "file", "custom", "private"]),
   position: positionSchema,
   width: z.number().positive().finite(),
   height: z.number().positive().finite(),

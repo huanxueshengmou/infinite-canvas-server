@@ -1,4 +1,4 @@
-export const COLLABORATION_PROTOCOL = "3";
+export const COLLABORATION_PROTOCOL = "4";
 export type CollaborationUser = { id: string; username: string; admin: boolean };
 export type CollaborationSession = { user: CollaborationUser; csrf: string; expiresAt: number };
 export type CollaborationRole = "owner" | "editor" | "viewer";
@@ -6,7 +6,7 @@ export type CollaborationCursor = { userId: string; username: string; position: 
 export type ProviderPolicy = { whitelistEnabled: boolean; whitelist: string[]; blacklist: string[] };
 export type SharedNode = {
     id: string;
-    kind: "text" | "image" | "video" | "file" | "custom" | "private";
+    kind: "text" | "markdown" | "image" | "video" | "file" | "custom" | "private";
     position: { x: number; y: number };
     width: number;
     height: number;
@@ -68,3 +68,4 @@ export async function collaborationApi<T>(path: string, init: RequestInit = {}):
 
 export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", category: "request", fields: [], request: { url: "", method: "POST", apiKey: "", header: "Authorization", authMode: "auto", bodyFormat: "json", contentType: "text/plain; charset=utf-8", headers: [], body: '{\n  "prompt": "{{input.text}}"\n}' } });
 export const collaborationFileUrl = (roomId: string, id: string) => `/api/rooms/${roomId}/files/${id}`;
+export const collaborationDownloadUrl = (roomId: string, id: string, filename: string) => `${collaborationFileUrl(roomId, id)}?${new URLSearchParams({ download: filename })}`;

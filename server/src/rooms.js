@@ -84,8 +84,11 @@ export class Rooms {
     return row;
   }
 
-  async checkFile(roomId, fileId) {
-    if (fileId && !(await this.db.get("SELECT id FROM files WHERE id=? AND room_id=?", [fileId, roomId]))) throw new HttpError(400, "文件不属于当前画布");
+  async checkFile(roomId, fileId, kind) {
+    if (!fileId) return;
+    const file = await this.db.get("SELECT mime FROM files WHERE id=? AND room_id=?", [fileId, roomId]);
+    if (!file) throw new HttpError(400, "文件不属于当前画布");
+    if ((kind === "image" && !file.mime.startsWith("image/")) || (kind === "video" && !file.mime.startsWith("video/"))) throw new HttpError(400, "此文件不支持该媒体预览，请使用文件附件节点");
   }
 
   async apply(roomId, userId, mutation, guard) {
@@ -120,7 +123,7 @@ export class Rooms {
           const isPrivate = source.kind === "private";
           if (isPrivate !== Boolean(source.privateData)) throw new HttpError(400, "隐私数据必须使用隐私节点");
           if (source.outputType && source.kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
-          await this.checkFile(roomId, isPrivate ? null : source.fileId);
+          await this.checkFile(roomId, isPrivate ? null : source.fileId, source.kind);
           const value = { kind: source.kind, position: source.position, width: source.width, height: source.height,
             title: isPrivate ? "隐私节点" : source.title, content: isPrivate ? "" : source.content, fileId: isPrivate ? null : source.fileId,
             ...(source.kind === "custom" ? { outputType: source.outputType || "text" } : {}) };
@@ -142,7 +145,7 @@ export class Rooms {
             nodes?.delete(id);
           } else {
             if (existing.visibility === "private" && Object.keys(operation.fields).some((key) => !["position", "width", "height"].includes(key))) throw new HttpError(400, "隐私内容只能经专用接口保存");
-            await this.checkFile(roomId, operation.fields.fileId);
+            await this.checkFile(roomId, operation.fields.fileId, JSON.parse(existing.public_json).kind);
             if (operation.fields.outputType && JSON.parse(existing.public_json).kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
             const value = { ...JSON.parse(existing.public_json), ...operation.fields };
             const row = { ...existing, version: existing.version + 1, public_json: JSON.stringify(value) };

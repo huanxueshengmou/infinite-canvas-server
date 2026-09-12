@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent } from "react";
-import { Alert, App, Button, Input, Modal, Space, Tooltip } from "antd";
-import { ArrowLeft, FileUp, LockKeyhole, Plus, RefreshCw, Share2, Trash2, Users, Workflow, Unplug, Cable, Undo2, Redo2 } from "lucide-react";
+import { Alert, App, Button, Dropdown, Input, Modal, Space, Tooltip } from "antd";
+import { ArrowLeft, Download, FileCode2, FileUp, LockKeyhole, Plus, RefreshCw, Share2, Trash2, Users, Workflow, Unplug, Cable, Undo2, Redo2 } from "lucide-react";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { collaborationApi, collaborationFileUrl, emptyPrivateData, type CollaborationMeta, type SharedNode, type NodeTemplate, type InputPort, type SharedEdge } from "@/services/api/collaboration";
+import { collaborationDownloadUrl, type CollaborationMeta, type SharedNode, type NodeTemplate, type InputPort, type SharedEdge } from "@/services/api/collaboration";
 import type { ViewportTransform } from "@/types/canvas";
 import { useCollaboration } from "./use-collaboration";
 import { PrivateDialog } from "./private-dialog";
 import { ShareDialog } from "./share-dialog";
 import { TemplatesDialog } from "./templates-dialog";
 import { CustomDialog } from "./custom-dialog";
+import { MarkdownNode } from "./markdown-node";
+import { FileNode } from "./file-node";
+import { transferFiles, useBoardTransfer } from "./use-board-transfer";
 
 const syncLabels = { connecting: "连接中", synced: "已同步", pending: "后台同步中", offline: "离线 · 草稿仅在当前页", denied: "需要重新验证权限", conflict: "有编辑冲突" };
 const inputPorts: { id: InputPort; label: string; offset: number }[] = [{ id: "input", label: "文本 / JSON 输入", offset: 70 }, { id: "image", label: "图片输入", offset: 112 }, { id: "audio", label: "音频输入", offset: 154 }];
@@ -19,6 +22,7 @@ type Point = { x: number; y: number };
 type Wire = { source: string; edge?: SharedEdge; point: Point; hover?: string };
 type Selection = { start: Point; end: Point; base: Set<string>; pointerId: number };
 const isInput = (target: EventTarget | null) => target instanceof Element && Boolean(target.closest("input,textarea,select,[contenteditable='true'],[role='textbox']"));
+const blurEditor = () => { if (document.activeElement instanceof HTMLElement && isInput(document.activeElement)) { document.activeElement.blur(); window.getSelection()?.removeAllRanges(); } };
 const curve = (from: { x: number; y: number }, to: { x: number; y: number }) => {
     const bend = Math.max(Math.abs(to.x - from.x) * 0.5, 50);
     return `M ${from.x} ${from.y} C ${from.x + bend} ${from.y}, ${to.x - bend} ${to.y}, ${to.x} ${to.y}`;
@@ -30,19 +34,23 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const [privateId, setPrivateId] = useState<string | null>(null);
     const [shareOpen, setShareOpen] = useState(false);
     const [templatesOpen, setTemplatesOpen] = useState(false);
+    const [createPoint, setCreatePoint] = useState<Point | undefined>();
     const [customId, setCustomId] = useState<string | null>(null);
     const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
     const [wiring, setWiring] = useState<Wire | null>(null);
     const [portChoice, setPortChoice] = useState<{ wire: Wire; target: string; ports: typeof inputPorts } | null>(null);
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
     const [selection, setSelection] = useState<Selection | null>(null);
-    const [busy, setBusy] = useState(false);
     const [viewport, setViewport] = useState<ViewportTransform>({ x: 100, y: 130, k: 1 });
     const closePrivate = useCallback(() => { setPrivateId(null); setShareOpen(false); setTemplatesOpen(false); setCustomId(null); setWiring(null); setPortChoice(null); }, []);
-    const closeTemplates = useCallback(() => setTemplatesOpen(false), []);
+    const closeTemplates = useCallback(() => { setTemplatesOpen(false); setCreatePoint(undefined); }, []);
     const sync = useCollaboration(roomId, meta, closePrivate);
     const containerRef = useRef<HTMLDivElement>(null);
     const fileRef = useRef<HTMLInputElement>(null);
+    const uploadPoint = useRef<Point | undefined>(undefined);
+    const transfer = useBoardTransfer({ roomId, meta, sync, viewport, containerRef });
+    const busy = transfer.busy;
+    const canCreate = sync.canEdit && ["synced", "pending"].includes(sync.state) && !busy;
     const drag = useRef<{ x: number; y: number; pointerId: number; nodes: { id: string; position: Point }[] } | null>(null);
     const reportError = (error: unknown) => { message.error((error as Error).message); };
     const worldPoint = (event: { clientX: number; clientY: number }) => {
@@ -74,39 +82,28 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
         catch (error) { reportError(error); }
     };
 
-    const create = async (kind: SharedNode["kind"], file?: { id: string; title: string }, template?: NodeTemplate) => {
-        const rect = containerRef.current?.getBoundingClientRect();
-        const width = ["image", "video"].includes(kind) ? 360 : 320;
-        const height = ["image", "video"].includes(kind) ? 300 : 240;
-        const position = { x: ((rect?.width || 800) / 2 - viewport.x) / viewport.k - width / 2, y: ((rect?.height || 600) / 2 - viewport.y) / viewport.k - height / 2 };
-        // Find an empty slot so a private placeholder cannot cover another person's text.
-        for (let attempt = 0; attempt <= sync.nodes.length; attempt++) {
-            if (!sync.nodes.some((node) => position.x < node.position.x + node.width && position.x + width > node.position.x && position.y < node.position.y + node.height && position.y + height > node.position.y)) break;
-            position.x += width + 32;
-            if ((position.x + width) * viewport.k + viewport.x > (rect?.width || 800) - 24) { position.x = (24 - viewport.x) / viewport.k; position.y += height + 32; }
-        }
-        const node = {
-            id: crypto.randomUUID(), kind,
-            position, width, height,
-            title: file?.title || template?.name || (kind === "text" ? "新文本" : ""), content: template?.kind === "custom" ? template.content : "", fileId: file?.id || null,
-            ...(kind === "private" ? { privateData: template?.privateData ? structuredClone(template.privateData) : emptyPrivateData() } : {}),
-            ...(kind === "custom" ? { outputType: template?.outputType || "text" as const } : {}),
-        };
-        setBusy(true);
-        try { await sync.mutate([{ type: "create", node }]); if (kind === "private") setPrivateId(node.id); if (kind === "custom") setCustomId(node.id); }
-        finally { setBusy(false); }
+    const create = async (kind: SharedNode["kind"], point?: Point, template?: NodeTemplate) => {
+        const node = await transfer.create(kind, point, template);
+        setSelectedNodes(new Set([node.id]));
+        if (kind === "private") setPrivateId(node.id);
+        if (kind === "custom") setCustomId(node.id);
     };
-    const upload = async (file?: File) => {
-        if (!file) return;
-        setBusy(true);
-        try {
-            const limits = await collaborationApi<CollaborationMeta>("/meta");
-            if (file.size > limits.maxFileBytes) { message.error(`单文件不能超过 ${limits.maxFileBytes / 1048576} MiB`); return; }
-            const body = new FormData(); body.append("file", file);
-            const stored = await collaborationApi<{ id: string; mime: string }>(`/rooms/${roomId}/files`, { method: "POST", body });
-            await create(stored.mime.startsWith("image/") ? "image" : stored.mime.startsWith("video/") ? "video" : "file", { id: stored.id, title: file.name });
-        } catch (error) { message.error((error as Error).message); }
-        finally { setBusy(false); if (fileRef.current) fileRef.current.value = ""; }
+    const upload = async (files: File[], point?: Point) => {
+        if (!files.length) return;
+        try { const ids = await transfer.importFiles(files, point); if (ids.length) setSelectedNodes(new Set(ids)); }
+        catch (error) { reportError(error); }
+    };
+    const chooseFiles = (kind = "file", point?: Point) => {
+        if (!fileRef.current) return;
+        uploadPoint.current = point;
+        fileRef.current.accept = kind === "image" ? "image/*" : kind === "video" ? "video/*" : "";
+        fileRef.current.click();
+    };
+    const downloadFile = (node: SharedNode) => {
+        if (!node.fileId) return;
+        const link = document.createElement("a");
+        link.href = collaborationDownloadUrl(roomId, node.fileId, node.title); link.download = node.title;
+        document.body.append(link); link.click(); link.remove();
     };
     const remove = (nodes: SharedNode[]) => modal.confirm({
         title: `从协作画布中删除${nodes.length > 1 ? `选中的 ${nodes.length} 个` : "这个"}节点？`,
@@ -132,6 +129,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const startSelection = (event: PointerEvent<HTMLDivElement>) => {
         if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || !containerRef.current?.contains(event.target as Node)) return;
         if ((event.target as Element).closest("[data-node-id],[data-connection-id]")) return;
+        blurEditor();
         event.preventDefault(); event.stopPropagation();
         containerRef.current.setPointerCapture(event.pointerId);
         const start = worldPoint(event), base = event.shiftKey ? new Set(selectedNodes) : new Set<string>();
@@ -145,6 +143,16 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const edgeEditable = chosenEdge && sync.canEdit && [chosenEdge.source, chosenEdge.target].every((id) => sync.nodes.find((node) => node.id === id)?.kind !== "private" || sync.ownPrivateIds.has(id));
     const customNode = sync.nodes.find((node) => node.id === customId);
     const selected = sync.nodes.filter((node) => selectedNodes.has(node.id) && availableNode(node));
+    useEffect(() => {
+        const blocked = (event: ClipboardEvent) => isInput(event.target) || Boolean(document.querySelector(".ant-modal-wrap:not([style*='display: none'])"));
+        const copy = (event: ClipboardEvent) => { if (!blocked(event) && !window.getSelection()?.toString()) transfer.copy(event, selectedNodes); };
+        const paste = (event: ClipboardEvent) => {
+            if (blocked(event)) return;
+            void transfer.paste(event).then((ids) => { if (ids?.length) setSelectedNodes(new Set(ids)); }).catch(reportError);
+        };
+        window.addEventListener("copy", copy); window.addEventListener("paste", paste);
+        return () => { window.removeEventListener("copy", copy); window.removeEventListener("paste", paste); };
+    });
     useEffect(() => {
         const keyboard = (event: KeyboardEvent) => {
             if (isInput(event.target) || document.querySelector(".ant-modal-wrap:not([style*='display: none'])") || privateId || customId || templatesOpen || shareOpen || portChoice || busy) return;
@@ -183,7 +191,10 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
             if (input?.dataset.targetId && input.dataset.inputPort) void connectTo(input.dataset.targetId, input.dataset.inputPort as InputPort);
             else { const target = element?.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId; if (target) connectNode(target, wiring); }
         }} onPointerCancel={() => { setWiring(null); setSelection(null); endDrag(); }} onPointerLeave={() => sync.setCursor(null)}>
-            <InfiniteCanvas containerRef={containerRef} viewport={viewport} tool="pan" onViewportChange={setViewport} onCanvasDeselect={() => { setSelectedEdge(null); setWiring(null); setSelectedNodes(new Set()); }}>
+            <InfiniteCanvas containerRef={containerRef} viewport={viewport} tool="pan" onViewportChange={setViewport} onCanvasDeselect={() => { blurEditor(); setSelectedEdge(null); setWiring(null); setSelectedNodes(new Set()); }} onCanvasDoubleClick={(event) => {
+                if (!canCreate || wiring || event.ctrlKey || event.metaKey || event.altKey) return;
+                setCreatePoint(worldPoint(event)); setTemplatesOpen(true);
+            }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void upload(transferFiles(event.dataTransfer), worldPoint(event)); }}>
                 <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1" aria-label="节点连线">
                     {sync.edges.map((edge) => {
                         const source = sync.nodes.find((node) => node.id === edge.source), target = sync.nodes.find((node) => node.id === edge.target);
@@ -200,8 +211,11 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                     const own = sync.ownPrivateIds.has(node.id);
                     const editable = sync.canEdit && (node.kind !== "private" || own);
                     const highlighted = selectedNodes.has(node.id) || (wiring?.hover === node.id && wiring.source !== node.id);
-                    return <div key={node.id} data-node-id={node.id} data-selected={selectedNodes.has(node.id) || undefined} className="absolute flex flex-col rounded-xl border" style={{ left: node.position.x, top: node.position.y, width: node.width, height: node.height, background: theme.node.panel, borderColor: highlighted ? theme.node.activeStroke : theme.node.stroke, outline: highlighted ? `1px solid ${theme.node.activeStroke}` : undefined }} onPointerDownCapture={(event) => {
-                        if (event.button !== 0 || wiring || !availableNode(node) || (event.target as Element).closest("button,input,textarea,a,video,[contenteditable='true']")) return;
+                    const downloadable = Boolean(node.fileId && ["image", "video", "file"].includes(node.kind));
+                    return <Dropdown key={node.id} trigger={["contextMenu"]} disabled={!downloadable} popupRender={(menu) => <div data-canvas-no-zoom>{menu}</div>} menu={{ items: downloadable ? [{ key: "download", icon: <Download className="size-4" />, label: "下载文件", onClick: () => downloadFile(node) }] : [] }}>
+                    <div data-node-id={node.id} data-node-kind={node.kind} data-selected={selectedNodes.has(node.id) || undefined} className="absolute flex flex-col rounded-xl border" style={{ left: node.position.x, top: node.position.y, width: node.width, height: node.height, background: theme.node.panel, borderColor: highlighted ? theme.node.activeStroke : theme.node.stroke, outline: highlighted ? `1px solid ${theme.node.activeStroke}` : undefined }} onPointerDownCapture={(event) => {
+                        if (event.button !== 0 || wiring || !availableNode(node) || isInput(event.target) || (event.target as Element).closest("button,a,video,.ant-dropdown")) return;
+                        blurEditor();
                         if (event.ctrlKey || event.metaKey) { event.preventDefault(); event.stopPropagation(); setSelectedNodes((current) => { const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; }); setSelectedEdge(null); }
                         else if (!selectedNodes.has(node.id)) { setSelectedNodes(new Set([node.id])); setSelectedEdge(null); }
                     }}>
@@ -219,8 +233,8 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                         </div> : node.kind === "custom" ? <div className="flex min-h-0 flex-1 flex-col gap-3 p-4"><span className="text-xs opacity-60">自定义 · {node.outputType === "json" ? "JSON 数据" : "文本拼接"}</span><pre className="min-h-0 flex-1 overflow-hidden whitespace-pre-wrap break-all text-xs opacity-70">{node.content}</pre><Button type="text" onClick={() => setCustomId(node.id)}>配置 / 计算输出</Button></div> : node.kind === "text" ? <div data-canvas-no-zoom className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3">
                             <Input aria-label="节点标题" variant="borderless" value={node.title} readOnly={!editable} onFocus={sync.beginEditing} onBlur={sync.endEditing} onChange={(event) => sync.edit(node.id, { title: event.target.value })} />
                             <Input.TextArea aria-label="协作文本" variant="borderless" className="!flex-1 !resize-none" value={node.content} readOnly={!editable} placeholder="写下内容，协作者会实时看到…" onFocus={sync.beginEditing} onBlur={sync.endEditing} onChange={(event) => sync.edit(node.id, { content: event.target.value })} />
-                        </div> : node.kind === "image" && node.fileId ? <img className="min-h-0 w-full flex-1 object-contain p-3" src={collaborationFileUrl(roomId, node.fileId)} alt={node.title} draggable={false} /> : node.kind === "video" && node.fileId ? <video data-canvas-no-zoom className="min-h-0 w-full flex-1 object-contain p-3" controls preload="metadata" src={collaborationFileUrl(roomId, node.fileId)} /> : <div className="flex flex-1 items-center justify-center p-4">{node.fileId && <a className="underline" href={collaborationFileUrl(roomId, node.fileId)} download>{node.title || "下载附件"}</a>}</div>}
-                    </div>;
+                        </div> : node.kind === "markdown" ? <MarkdownNode node={node} editable={editable} onEdit={(fields) => sync.edit(node.id, fields)} onBegin={sync.beginEditing} onEnd={sync.endEditing} /> : <FileNode key={node.fileId} roomId={roomId} node={node} />}
+                    </div></Dropdown>;
                 })}
                 {selection && <div data-selection-box className="pointer-events-none absolute z-30 border" style={{ left: Math.min(selection.start.x, selection.end.x), top: Math.min(selection.start.y, selection.end.y), width: Math.abs(selection.end.x - selection.start.x), height: Math.abs(selection.end.y - selection.start.y), borderColor: theme.node.activeStroke, background: theme.node.activeStroke, opacity: 0.2 }} />}
                 {sync.cursors.map((cursor) => {
@@ -248,25 +262,26 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
             <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-2 pb-4 pt-2 sm:inset-x-auto sm:bottom-2 sm:left-1/2 sm:min-w-max sm:-translate-x-1/2 sm:flex-nowrap" style={{ color: theme.node.text, background: theme.canvas.background }}>
                 <Tooltip title="撤销 Ctrl/⌘+Z"><Button type="text" aria-label="撤销" disabled={!sync.canEdit || !sync.history.canUndo || busy} icon={<Undo2 className="size-4" />} onClick={() => void sync.changeHistory("undo").catch(reportError)} /></Tooltip>
                 <Tooltip title="重做 Ctrl+Y / Ctrl/⌘+Shift+Z"><Button type="text" aria-label="重做" disabled={!sync.canEdit || !sync.history.canRedo || busy} icon={<Redo2 className="size-4" />} onClick={() => void sync.changeHistory("redo").catch(reportError)} /></Tooltip>
-                <Button type="text" disabled={!sync.canEdit || busy} icon={<Plus className="size-4" />} onClick={() => void create("text").catch(reportError)}>协作文本</Button>
-                <Button type="text" disabled={!sync.canEdit || busy} icon={<FileUp className="size-4" />} onClick={() => fileRef.current?.click()}>共享图片 / 文件</Button>
-                <Button type="text" disabled={!sync.canEdit || busy} icon={<Workflow className="size-4" />} onClick={() => setTemplatesOpen(true)}>节点模板</Button>
-                <Button type="text" disabled={!sync.canEdit || busy} icon={<LockKeyhole className="size-4" />} onClick={() => void create("private").catch(reportError)}>隐私节点</Button>
+                <Button type="text" disabled={!canCreate} icon={<Plus className="size-4" />} onClick={() => void create("text").catch(reportError)}>协作文本</Button>
+                <Button type="text" disabled={!canCreate} icon={<FileCode2 className="size-4" />} onClick={() => void create("markdown").catch(reportError)}>Markdown</Button>
+                <Button type="text" disabled={!canCreate} aria-label="共享图片 / 文件" icon={<FileUp className="size-4" />} onClick={() => chooseFiles()}>{busy ? "正在加入…" : "图片 / 视频 / 文件"}</Button>
+                <Button type="text" disabled={!canCreate} icon={<Workflow className="size-4" />} onClick={() => { setCreatePoint(undefined); setTemplatesOpen(true); }}>节点模板</Button>
+                <Button type="text" disabled={!canCreate} icon={<LockKeyhole className="size-4" />} onClick={() => void create("private").catch(reportError)}>隐私节点</Button>
                 <span className="ml-3 text-xs opacity-60">{Math.round(viewport.k * 100)}%</span>
             </div>
             <div className="pointer-events-none absolute bottom-28 left-4 right-4 text-center text-xs sm:bottom-20 sm:left-1/2 sm:right-auto sm:-translate-x-1/2" style={{ color: theme.node.muted }}>
                 {wiring ? <span>拖到下游节点即可连接，也可指定输入端口 · Esc 取消</span> : chosenEdge ? <Space className="pointer-events-auto">
                     <Button type="text" disabled={!edgeEditable} icon={<Cable className="size-4" />} onClick={() => { const target = sync.nodes.find((node) => node.id === chosenEdge.target)!; setWiring({ source: chosenEdge.source, edge: chosenEdge, point: target.position }); }}>重连输入</Button>
                     <Button type="text" disabled={!edgeEditable} icon={<Unplug className="size-4" />} onClick={() => void disconnect(chosenEdge)}>断开连线</Button>
-                </Space> : selected.length ? <Space className="pointer-events-auto"><span>已选择 {selected.length} 个节点 · 拖动标题可一起移动</span><Button type="text" disabled={!sync.canEdit || busy} icon={<Trash2 className="size-4" />} onClick={() => remove(selected)}>删除所选</Button></Space> : <span>Ctrl/⌘+拖拽框选 · Ctrl/⌘+点击多选 · 输出拖到节点连线 · 右键线断开</span>}
+                </Space> : selected.length ? <Space className="pointer-events-auto"><span>已选择 {selected.length} 个节点 · Ctrl/⌘+C 复制 · 文件右键下载</span><Button type="text" disabled={!sync.canEdit || busy} icon={<Trash2 className="size-4" />} onClick={() => remove(selected)}>删除所选</Button></Space> : <span>双击空白处添加节点 · 拖入文件 / Ctrl/⌘+V 粘贴 · Ctrl/⌘+拖拽框选</span>}
             </div>
             <Modal open={Boolean(portChoice)} title="选择输入类型" footer={null} onCancel={() => setPortChoice(null)} destroyOnHidden>
                 <p className="mb-4 text-sm opacity-70">这个输出可以接入多种输入，请选择本次连接要传递的数据类型。</p>
                 <Space wrap>{portChoice?.ports.map((port) => <Button key={port.id} onClick={() => void connectTo(portChoice.target, port.id, portChoice.wire)}>{port.label}</Button>)}</Space>
             </Modal>
-            <input ref={fileRef} type="file" className="hidden" aria-label="上传共享文件" onChange={(event) => void upload(event.target.files?.[0])} />
+            <input ref={fileRef} type="file" multiple className="hidden" aria-label="上传共享文件" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; void upload(files, uploadPoint.current); }} />
             {privateId && <PrivateDialog roomId={roomId} nodeId={privateId} onClose={closePrivate} canEdit={sync.canEdit} />}
-            {templatesOpen && <TemplatesDialog onClose={closeTemplates} onCreate={async (template) => { await create(template.kind, undefined, template); }} />}
+            {templatesOpen && <TemplatesDialog onClose={closeTemplates} onCreate={async (template) => { await create(template.kind, createPoint, template); }} onAddType={async (kind) => { if (["image", "video", "file"].includes(kind)) chooseFiles(kind, createPoint); else await create(kind, createPoint); }} />}
             {customNode && <CustomDialog key={customNode.id} roomId={roomId} node={customNode} canEdit={sync.canEdit} onClose={() => setCustomId(null)} onSave={async (version, fields) => { await sync.mutate([{ type: "update", id: customNode.id, version, fields }]); }} />}
             {shareOpen && sync.room && <ShareDialog room={sync.room} onClose={() => setShareOpen(false)} shareTtlMs={meta.shareTtlMs} />}
             <Modal open={sync.conflicts.length > 0} title="编辑冲突 · 你的草稿已保留" footer={null} closable={false} maskClosable={false}>

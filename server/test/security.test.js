@@ -20,6 +20,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
   const before = (await f.request("GET", privatePath, undefined, owner)).body;
   const writes = [
     ["POST", `/api/rooms/${room.id}/operations`, { operationId: randomUUID(), operations: [{ type: "delete", id: node.id, version: 1 }] }],
+    ["POST", `/api/rooms/${room.id}/files`, {}],
     ["PUT", privatePath, { version: 1, data: privateData("obsolete-client-key") }],
     ["POST", `${privatePath}/run`, { version: 1 }],
     ["POST", `${privatePath}/publish`, {}],
@@ -27,7 +28,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
     ["POST", "/api/node-templates", {}],
     ["PUT", "/api/admin/providers", { hosts: [] }],
   ];
-  for (const version of [undefined, "1", "2", "999"]) {
+  for (const version of [undefined, "1", "2", "3", "999"]) {
     for (const [method, url, payload] of writes) {
       const headers = { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf };
       if (version !== undefined) headers["x-canvas-protocol"] = version;
@@ -39,7 +40,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
   assert.deepEqual((await f.request("GET", privatePath, undefined, owner)).body, before);
   assert.equal((await f.request("GET", `/api/rooms/${room.id}`, undefined, owner)).body.revision, 1);
   assert.equal(providerCalls, 0);
-  for (const query of ["", "?v=1", "?v=2", "?v=999"]) {
+  for (const query of ["", "?v=1", "?v=2", "?v=3", "?v=999"]) {
     const ws = new WebSocket(`ws://127.0.0.1:${f.port}/api/rooms/${room.id}/events${query}`, { origin: f.config.APP_ORIGIN, headers: { cookie: owner.cookie } });
     const events = [];
     ws.on("message", (data) => events.push(data.toString()));

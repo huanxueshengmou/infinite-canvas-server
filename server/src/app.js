@@ -4,6 +4,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import serveStatic from "@fastify/static";
+import { create as contentDisposition } from "content-disposition";
 import { randomUUID } from "node:crypto";
 import { stat, mkdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -15,6 +16,7 @@ import { loadMasterKey, hashPassword, verifyPassword, token, digest, encrypt } f
 import { credentialsSchema, mutationSchema, historyActionSchema, privateSchema, idSchema, publicNode, publicEdge, PROTOCOL_VERSION } from "./schemas.js";
 import { Rooms, HttpError, auditStep } from "./rooms.js";
 import { safeMediaTypes } from "./egress.js";
+import { uploadedMime } from "./file-types.js";
 import { providerPolicy, providerPolicySchema } from "./provider-policy.js";
 import { applyHistory } from "./history.js";
 import { privateRecord, registerWorkflowRoutes } from "./workflow-routes.js";
@@ -36,7 +38,7 @@ export async function createApp(options = {}) {
   const loopDelay = monitorEventLoopDelay();
   loopDelay.enable();
   let ioActive = 0;
-  const downloadQueue = [];
+  const fileQueue = [];
   let backupActive;
   let lastBackup = null;
   let backupError = null;
@@ -89,7 +91,7 @@ export async function createApp(options = {}) {
     request.session = await sessionFromCookie(request.headers.cookie);
     if (mutating && request.headers["x-csrf-token"] !== request.session.csrf) throw new HttpError(403, "安全验证已失效，请刷新页面");
     const route = request.routeOptions.url || pathname;
-    if (mutating && (/^\/api\/rooms\/[^/]+\/(operations|history\/[^/]+|private\/[^/]+(?:\/(run|publish))?)$/.test(route) || route.startsWith("/api/node-templates") || route === "/api/admin/providers") && request.headers["x-canvas-protocol"] !== PROTOCOL_VERSION) throw new HttpError(409, "协作服务已更新，请刷新网页后继续；本次修改未保存");
+    if (mutating && (/^\/api\/rooms\/[^/]+\/(operations|files|history\/[^/]+|private\/[^/]+(?:\/(run|publish))?)$/.test(route) || route.startsWith("/api/node-templates") || route === "/api/admin/providers") && request.headers["x-canvas-protocol"] !== PROTOCOL_VERSION) throw new HttpError(409, "协作服务已更新，请刷新网页后继续；本次修改未保存");
   });
   app.addHook("preHandler", async (request) => {
     // Recheck after reading a body: a slow upload cannot retain an expired/login-revoked session.
@@ -104,14 +106,14 @@ export async function createApp(options = {}) {
     reply.code(status).send({ error: message, ...(error instanceof HttpError && error.details ? { details: error.details } : {}) });
   });
 
-  const runIO = async (task, queueDownload = false) => {
+  const runIO = async (task, queueFile = false) => {
     if (ioActive >= config.API_CONCURRENCY) {
-      if (!queueDownload || downloadQueue.length >= config.MAX_ROOM_CONNECTIONS) throw new HttpError(429, "文件或 API 处理繁忙，请稍后再试");
-      await new Promise((resolve) => downloadQueue.push(resolve));
+      if (!queueFile || fileQueue.length >= config.MAX_ROOM_CONNECTIONS) throw new HttpError(429, "文件或 API 处理繁忙，请稍后再试");
+      await new Promise((resolve) => fileQueue.push(resolve));
     } else ioActive++;
     try { return await task(); }
     finally {
-      const next = downloadQueue.shift();
+      const next = fileQueue.shift();
       if (next) next(); else ioActive--;
     }
   };
@@ -351,7 +353,7 @@ export async function createApp(options = {}) {
     if (!part) throw new HttpError(400, "请选择一个文件");
     const id = randomUUID();
     const size = await saveEncryptedFile(part.file, id, key, config);
-    const mime = safeMediaTypes.includes(part.mimetype) ? part.mimetype : "application/octet-stream";
+    const mime = uploadedMime(part.filename);
     try {
       await rooms.lock(roomId, async () => {
         await sessionFromCookie(request.headers.cookie);
@@ -363,9 +365,10 @@ export async function createApp(options = {}) {
       throw error;
     }
     return { id, mime, size };
-  }));
+  }, true));
   app.get("/api/rooms/:roomId/files/:fileId", async (request, reply) => runIO(async () => {
     const roomId = validateRoom(request), id = idSchema.parse(request.params.fileId);
+    const { download } = z.object({ download: z.string().optional() }).parse(request.query);
     await sessionFromCookie(request.headers.cookie);
     await rooms.access(roomId, request.session.user.id);
     const file = await db.get("SELECT * FROM files WHERE room_id=? AND id=?", [roomId, id]);
@@ -385,7 +388,9 @@ export async function createApp(options = {}) {
       const timer = setTimeout(abort, Math.max(1, Math.min(request.session.expiresAt, access.accessUntil) - Date.now()));
       controller.signal.addEventListener("abort", () => data.stream.destroy(), { once: true });
       try {
-        reply.type(file.mime).header("Content-Length", file.size).header("Content-Disposition", `${safeMediaTypes.includes(file.mime) ? "inline" : "attachment"}; filename="${id}"`);
+        const filename = (download || id).replace(/[\\/\u0000-\u001f\u007f]/g, "_");
+        const type = download !== undefined || !safeMediaTypes.includes(file.mime) ? "attachment" : "inline";
+        reply.type(file.mime).header("Content-Length", file.size).header("Content-Disposition", contentDisposition(filename, { type }));
         await reply.send(data.stream);
         return reply;
       } finally { clearTimeout(timer); }
