@@ -41,7 +41,7 @@ export function selectedMedia(result, path, category) {
   return { ...candidate, value: candidate.base64 ? `data:image/png;base64,${value}` : value };
 }
 
-class FileInput {
+export class FileInput {
   constructor(file) { this.file = file; }
 }
 
@@ -56,7 +56,7 @@ function placeholder(context, expression) {
 export function renderText(template, context, url = false) {
   return template.replace(/\{\{\s*([\w.]+\??)\s*\}\}/g, (_match, path) => {
     const value = placeholder(context, path);
-    if (value instanceof FileInput) throw new HttpError(400, "文件输入只能作为 JSON 字段的完整占位符使用");
+    if (value instanceof FileInput) throw new HttpError(400, "附件需要在 JSON 或表单中使用完整占位符");
     const text = value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value);
     return url ? encodeURIComponent(text) : text;
   });

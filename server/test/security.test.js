@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { WebSocket } from "ws";
 import { fixture, textNode, privateNode, privateData } from "./helpers.js";
 import { resolveTarget, isPublicAddress } from "../src/egress.js";
+import { PROTOCOL_VERSION } from "../src/schemas.js";
 
 test("outdated clients cannot overwrite workflow data or receive incompatible snapshots", async (t) => {
   let providerCalls = 0;
@@ -14,7 +15,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
   const owner = await f.login(await f.user("owner"));
   const room = await f.room(owner), node = privateNode();
   assert.equal((await f.send(room.id, owner, [{ type: "create", node }])).status, 200);
-  assert.equal((await f.request("GET", "/api/meta")).body.protocolVersion, "2");
+  assert.equal((await f.request("GET", "/api/meta")).body.protocolVersion, PROTOCOL_VERSION);
   const privatePath = `/api/rooms/${room.id}/private/${node.id}`;
   const before = (await f.request("GET", privatePath, undefined, owner)).body;
   const writes = [
@@ -22,8 +23,11 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
     ["PUT", privatePath, { version: 1, data: privateData("obsolete-client-key") }],
     ["POST", `${privatePath}/run`, { version: 1 }],
     ["POST", `${privatePath}/publish`, {}],
+    ["POST", `/api/rooms/${room.id}/history/${randomUUID()}`, {}],
+    ["POST", "/api/node-templates", {}],
+    ["PUT", "/api/admin/providers", { hosts: [] }],
   ];
-  for (const version of [undefined, "1", "999"]) {
+  for (const version of [undefined, "1", "2", "999"]) {
     for (const [method, url, payload] of writes) {
       const headers = { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf };
       if (version !== undefined) headers["x-canvas-protocol"] = version;
@@ -35,7 +39,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
   assert.deepEqual((await f.request("GET", privatePath, undefined, owner)).body, before);
   assert.equal((await f.request("GET", `/api/rooms/${room.id}`, undefined, owner)).body.revision, 1);
   assert.equal(providerCalls, 0);
-  for (const query of ["", "?v=1", "?v=999"]) {
+  for (const query of ["", "?v=1", "?v=2", "?v=999"]) {
     const ws = new WebSocket(`ws://127.0.0.1:${f.port}/api/rooms/${room.id}/events${query}`, { origin: f.config.APP_ORIGIN, headers: { cookie: owner.cookie } });
     const events = [];
     ws.on("message", (data) => events.push(data.toString()));
@@ -133,7 +137,7 @@ test("optimistic versions and idempotent receipts prevent lost or duplicate writ
   assert.equal(snapshot.nodes[0].title, node.title);
   assert.equal(snapshot.nodes[0].version, 2);
   assert.equal(snapshot.revision, 2);
-  const overLimit = await f.app.inject({ method: "POST", url: `/api/rooms/${room.id}/operations`, headers: { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf, "x-canvas-protocol": "2", "content-type": "application/json" }, payload: JSON.stringify({ content: "x".repeat(f.config.MAX_SYNC_BYTES) }) });
+  const overLimit = await f.app.inject({ method: "POST", url: `/api/rooms/${room.id}/operations`, headers: { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf, "x-canvas-protocol": PROTOCOL_VERSION, "content-type": "application/json" }, payload: JSON.stringify({ content: "x".repeat(f.config.MAX_SYNC_BYTES) }) });
   assert.equal(overLimit.statusCode, 413);
 });
 
@@ -155,8 +159,9 @@ test("egress blocks SSRF and validates every DNS answer before pinning", async (
   for (const ip of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "172.16.0.1", "192.168.1.1", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1", "100.100.100.200", "0.0.0.0"]) assert.equal(isPublicAddress(ip), false, ip);
   assert.equal(isPublicAddress("8.8.8.8"), true);
   const publicDns = async () => [{ address: "8.8.8.8", family: 4 }];
-  for (const url of ["http://api.example.com", "https://api.example.com:8443", "https://user:pass@api.example.com", "https://other.example.com", "file:///etc/passwd"]) await assert.rejects(resolveTarget(url, ["api.example.com"], publicDns));
-  await assert.rejects(resolveTarget("https://api.example.com", ["api.example.com"], async () => [{ address: "8.8.8.8", family: 4 }, { address: "127.0.0.1", family: 4 }]));
-  const approved = await resolveTarget("https://api.example.com/v1", ["api.example.com"], publicDns);
+  const policy = { whitelistEnabled: true, whitelist: ["api.example.com"], blacklist: [] };
+  for (const url of ["http://api.example.com", "https://api.example.com:8443", "https://user:pass@api.example.com", "https://other.example.com", "file:///etc/passwd"]) await assert.rejects(resolveTarget(url, policy, publicDns));
+  await assert.rejects(resolveTarget("https://api.example.com", policy, async () => [{ address: "8.8.8.8", family: 4 }, { address: "127.0.0.1", family: 4 }]));
+  const approved = await resolveTarget("https://api.example.com/v1", policy, publicDns);
   assert.equal(approved.address.address, "8.8.8.8");
 });

@@ -1,7 +1,9 @@
+export const COLLABORATION_PROTOCOL = "3";
 export type CollaborationUser = { id: string; username: string; admin: boolean };
 export type CollaborationSession = { user: CollaborationUser; csrf: string; expiresAt: number };
 export type CollaborationRole = "owner" | "editor" | "viewer";
 export type CollaborationCursor = { userId: string; username: string; position: { x: number; y: number } };
+export type ProviderPolicy = { whitelistEnabled: boolean; whitelist: string[]; blacklist: string[] };
 export type SharedNode = {
     id: string;
     kind: "text" | "image" | "video" | "file" | "custom" | "private";
@@ -22,7 +24,11 @@ export type PrivateData = {
     note: string;
     category: "request" | "image" | "video" | "llm";
     fields: { name: string; label: string; type: "text" | "number" | "boolean"; value: string | number | boolean }[];
-    request: { url: string; method: "GET" | "POST"; apiKey: string; header: "Authorization" | "x-api-key"; body: string };
+    request: {
+        url: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; apiKey: string; header: string; body: string;
+        authMode: "auto" | "raw" | "none"; bodyFormat: "json" | "urlencoded" | "multipart" | "text"; contentType: string;
+        headers: { name: string; value: string; secret: boolean }[];
+    };
     poll?: { url: string; taskIdPath: string };
 };
 export type ResultMedia = { path: string; type: "image" | "video" | "audio"; base64?: boolean };
@@ -36,7 +42,7 @@ export type NodeOperation =
     | { type: "delete"; id: string; version: number }
     | { type: "connect"; edge: Omit<SharedEdge, "version">; version?: number }
     | { type: "disconnect"; id: string; version: number };
-export type ChangeEvent = { type: "changes"; operationId: string; revision: number; changes: ({ type: "upsert"; node: SharedNode } | { type: "delete"; id: string } | { type: "edge-upsert"; edge: SharedEdge } | { type: "edge-delete"; id: string })[] };
+export type ChangeEvent = { type: "changes"; operationId: string; historyId?: string; revision: number; changes: ({ type: "upsert"; node: SharedNode } | { type: "delete"; id: string } | { type: "edge-upsert"; edge: SharedEdge } | { type: "edge-delete"; id: string })[] };
 export type CollaborationMeta = { maxRoomConnections: number; maxSyncBytes: number; maxFileBytes: number; syncBatchMs: number; shareTtlMs: number; apiTimeoutMs: number };
 
 export class CollaborationError extends Error {
@@ -51,7 +57,7 @@ export const setCollaborationSession = (value: CollaborationSession | null) => {
 
 export async function collaborationApi<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
-    headers.set("X-Canvas-Protocol", "2");
+    headers.set("X-Canvas-Protocol", COLLABORATION_PROTOCOL);
     if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
     if (session && init.method && !["GET", "HEAD"].includes(init.method)) headers.set("X-CSRF-Token", session.csrf);
     const response = await fetch(`/api${path}`, { ...init, headers, credentials: "same-origin", cache: "no-store" });
@@ -60,5 +66,5 @@ export async function collaborationApi<T>(path: string, init: RequestInit = {}):
     return data as T;
 }
 
-export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", category: "request", fields: [], request: { url: "", method: "POST", apiKey: "", header: "Authorization", body: '{\n  "prompt": "{{input.text}}"\n}' } });
+export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", category: "request", fields: [], request: { url: "", method: "POST", apiKey: "", header: "Authorization", authMode: "auto", bodyFormat: "json", contentType: "text/plain; charset=utf-8", headers: [], body: '{\n  "prompt": "{{input.text}}"\n}' } });
 export const collaborationFileUrl = (roomId: string, id: string) => `/api/rooms/${roomId}/files/${id}`;

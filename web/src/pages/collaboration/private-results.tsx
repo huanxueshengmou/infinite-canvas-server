@@ -44,7 +44,7 @@ export function PrivateResults({ path, record, canEdit }: { path: string; record
                 <Button disabled={!publishable || !media} onClick={() => prepare("media")}>发布所选媒体</Button>
             </Space>
             {preview && !failed && (media?.type === "video" ? <video className="max-h-80 w-full" controls preload="metadata" src={mediaUrl} onError={() => setFailed(true)} /> : media?.type === "audio" ? <audio controls src={mediaUrl} onError={() => setFailed(true)} /> : <img className="max-h-80 w-full object-contain" src={mediaUrl} alt="仅自己可见的生成结果" onError={() => setFailed(true)} />)}
-            {failed && <Alert type="warning" title="媒体加载失败。请检查结果是否过期，以及媒体域名是否已加入服务管理的允许列表。" />}
+            {failed && <Alert type="warning" title="媒体加载失败。请检查结果是否过期，以及媒体域名是否符合服务管理中的域名规则。" />}
         </div>}
         <Collapse items={[{ key: "raw", label: "查看完整原始响应", children: <pre className="max-h-80 select-text overflow-auto whitespace-pre-wrap break-all text-xs">{record.result.text}</pre> }]} />
         <div className="mt-4">

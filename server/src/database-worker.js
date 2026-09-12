@@ -5,9 +5,9 @@ import { chmod } from "node:fs/promises";
 
 const db = new DatabaseSync(workerData.path);
 const storageVersion = db.prepare("PRAGMA user_version").get().user_version;
-if (![0, 1, 2].includes(storageVersion)) throw new Error("Unknown database version; refusing to alter stored data");
-if (storageVersion === 1) {
-  const beforeMigration = `${workerData.path}.before-v2-${randomUUID()}.sqlite`;
+if (![0, 1, 2, 3].includes(storageVersion)) throw new Error("Unknown database version; refusing to alter stored data");
+if (storageVersion > 0 && storageVersion < 3) {
+  const beforeMigration = `${workerData.path}.before-v3-${randomUUID()}.sqlite`;
   await backup(db, beforeMigration);
   await chmod(beforeMigration, 0o600);
 }
@@ -71,13 +71,18 @@ db.exec(`
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
     cipher TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS operation_history (
+    room_id TEXT NOT NULL REFERENCES rooms(id), user_id TEXT NOT NULL REFERENCES users(id),
+    id TEXT NOT NULL, cipher TEXT NOT NULL,
+    PRIMARY KEY(room_id,user_id,id)
+  );
   CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
   CREATE INDEX IF NOT EXISTS shares_room ON shares(room_id);
   CREATE INDEX IF NOT EXISTS audit_room ON audit(room_id, id);
   CREATE INDEX IF NOT EXISTS edges_source ON edges(room_id,source);
   CREATE INDEX IF NOT EXISTS node_templates_owner ON node_templates(owner_id);
-  PRAGMA user_version=2;
+  PRAGMA user_version=3;
   COMMIT;
 `);
 

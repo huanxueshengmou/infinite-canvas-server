@@ -6,6 +6,7 @@ import { WebSocket } from "ws";
 import { createApp } from "../src/app.js";
 import { getConfig } from "../src/config.js";
 import { hashPassword } from "../src/crypto.js";
+import { PROTOCOL_VERSION } from "../src/schemas.js";
 
 export async function fixture(t, overrides = {}, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "canvas-test-"));
@@ -22,8 +23,9 @@ export async function fixture(t, overrides = {}, options = {}) {
     return { id, username, password };
   };
   const request = async (method, path, body, auth, extraHeaders = {}) => {
-    const headers = { origin: config.APP_ORIGIN, "x-canvas-protocol": "2", ...extraHeaders };
+    const headers = { origin: config.APP_ORIGIN, "x-canvas-protocol": PROTOCOL_VERSION, ...extraHeaders };
     if (auth) { headers.cookie = auth.cookie; headers["x-csrf-token"] = auth.csrf; }
+    Object.assign(headers, extraHeaders);
     const response = await app.inject({ method, url: path, payload: body, headers });
     return { response, status: response.statusCode, body: response.headers["content-type"]?.includes("application/json") ? response.json() : response.body };
   };
@@ -37,7 +39,7 @@ export async function fixture(t, overrides = {}, options = {}) {
   const joinRoom = (invitation, auth) => request("POST", "/api/shares/join", { token: invitation.token }, auth);
   const send = (roomId, auth, operations, operationId = randomUUID()) => request("POST", `/api/rooms/${roomId}/operations`, { operationId, operations }, auth);
   const socket = (roomId, auth, origin = config.APP_ORIGIN) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rooms/${roomId}/events?v=2`, { origin, headers: auth ? { cookie: auth.cookie } : {} });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rooms/${roomId}/events?v=${PROTOCOL_VERSION}`, { origin, headers: auth ? { cookie: auth.cookie } : {} });
     const events = [];
     ws.on("message", (data) => events.push(JSON.parse(data.toString())));
     const ready = new Promise((resolve, reject) => {

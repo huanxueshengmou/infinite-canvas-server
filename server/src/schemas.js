@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { requestSchema } from "./request-config.js";
 
-export const PROTOCOL_VERSION = "2";
+export const PROTOCOL_VERSION = "3";
 
 export const idSchema = z.string().uuid();
 export const credentialsSchema = z.object({
@@ -30,13 +31,7 @@ export const privateSchema = z.object({
     type: z.enum(["text", "number", "boolean"]),
     value: z.union([z.string(), z.number().finite(), z.boolean()]),
   }).strict()).default([]).refine((fields) => new Set(fields.map((field) => field.name)).size === fields.length),
-  request: z.object({
-    url: z.string(),
-    method: z.enum(["GET", "POST"]),
-    apiKey: z.string(),
-    header: z.enum(["Authorization", "x-api-key"]),
-    body: z.string(),
-  }).strict(),
+  request: requestSchema,
   poll: z.object({ url: z.string(), taskIdPath: z.string() }).strict().optional(),
 }).strict();
 
@@ -71,6 +66,7 @@ export const templateSchema = z.object({
 
 export const mutationSchema = z.object({
   operationId: idSchema,
+  historyId: idSchema.optional(),
   operations: z.array(z.discriminatedUnion("type", [
     z.object({ type: z.literal("create"), node: createNodeSchema }).strict(),
     z.object({ type: z.literal("update"), id: idSchema, version: z.number().int().positive(), fields: nodeFieldsSchema }).strict(),
@@ -78,6 +74,13 @@ export const mutationSchema = z.object({
     z.object({ type: z.literal("connect"), edge: edgeSchema, version: z.number().int().positive().optional() }).strict(),
     z.object({ type: z.literal("disconnect"), id: idSchema, version: z.number().int().positive() }).strict(),
   ])).min(1),
+}).strict();
+
+export const historyActionSchema = z.object({
+  operationId: idSchema,
+  direction: z.enum(["undo", "redo"]),
+  nodes: z.record(idSchema, z.number().int().positive().nullable()),
+  edges: z.record(idSchema, z.number().int().positive().nullable()),
 }).strict();
 
 export function publicNode(row) {

@@ -3,26 +3,29 @@ import { lookup } from "node:dns/promises";
 import ipaddr from "ipaddr.js";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { assertAllowedHost } from "./provider-policy.js";
+import { outgoingHeaders } from "./request-config.js";
+
+const policyFor = (config) => config.providerPolicy || { whitelistEnabled: true, whitelist: config.allowedHosts, blacklist: [] };
 
 export function isPublicAddress(value) {
   try { return ipaddr.process(value).range() === "unicast"; } catch { return false; }
 }
 
-export async function resolveTarget(raw, allowedHosts, resolver = lookup) {
+export async function resolveTarget(raw, policy, resolver = lookup) {
   const url = new URL(raw);
   if (url.protocol !== "https:" || url.username || url.password || url.hash || (url.port && url.port !== "443")) throw new Error("API 只允许不含账户信息的 HTTPS 443 地址");
-  if (!allowedHosts.includes(url.hostname.toLowerCase())) throw new Error("API 域名尚未加入管理员允许列表");
+  assertAllowedHost(url.hostname, policy);
   const addresses = await resolver(url.hostname, { all: true, verbatim: true });
   if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error("禁止访问内网、回环、链路本地及云元数据地址");
   return { url, address: addresses[0] };
 }
 
 export async function executePrivateRequest(request, config, signal) {
-  const { url, address } = await resolveTarget(request.url, config.allowedHosts);
+  const { url, address } = await resolveTarget(request.url, policyFor(config));
   // Pin the verified DNS result to the actual TLS connection; never follow redirects.
   return new Promise((resolve, reject) => {
-    const headers = { "Accept": "application/json, text/plain", "Content-Type": "application/json" };
-    if (request.apiKey) headers[request.header] = request.header === "Authorization" ? `Bearer ${request.apiKey}` : request.apiKey;
+    const headers = outgoingHeaders(request);
     const req = https.request(url, {
       method: request.method,
       headers,
@@ -49,12 +52,12 @@ export async function executePrivateRequest(request, config, signal) {
       response.on("error", reject);
       response.on("end", () => {
         let text = Buffer.concat(chunks).toString("utf8");
-        if (request.apiKey) text = text.split(request.apiKey).join("[已隐藏密钥]");
+        for (const secret of [request.apiKey, ...(request.headers || []).filter((header) => header.secret !== false).map((header) => header.value)]) if (secret) text = text.split(secret).join("[已隐藏密钥]");
         resolve({ status: response.statusCode, text });
       });
     });
     req.on("error", () => reject(new Error(signal.aborted ? "API 请求超时或已取消" : "API 请求失败，请检查域名及请求配置")));
-    if (request.method !== "POST" || typeof request.body === "string") req.end(request.method === "POST" ? request.body : undefined);
+    if (["GET", "HEAD"].includes(request.method) || typeof request.body === "string") req.end(["GET", "HEAD"].includes(request.method) ? undefined : request.body);
     else void pipeline(Readable.from(request.body), req, { signal }).catch(() => reject(new Error(signal.aborted ? "API 请求超时或已取消" : "API 附件读取或发送失败")));
   });
 }
@@ -72,7 +75,7 @@ export async function openResultMedia(raw, config, signal) {
     return { stream: Readable.from([bytes]), mime: match[1] };
   }
   let target;
-  try { target = await resolveTarget(raw, config.allowedHosts); }
+  try { target = await resolveTarget(raw, policyFor(config)); }
   catch (error) { throw fail(error.message, 400); }
   const { url, address } = target;
   return new Promise((resolve, reject) => {
@@ -95,7 +98,7 @@ export async function openResultMedia(raw, config, signal) {
       void pipeline(response, limited, { signal }).catch(() => {});
       resolve({ stream: limited, mime });
     });
-    req.on("error", () => reject(fail(signal.aborted ? "媒体请求超时或已取消" : "媒体请求失败，请检查域名允许列表")));
+    req.on("error", () => reject(fail(signal.aborted ? "媒体请求超时或已取消" : "媒体请求失败，请检查域名规则")));
     req.end();
   });
 }

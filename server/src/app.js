@@ -12,9 +12,11 @@ import { z, ZodError } from "zod";
 import { getConfig } from "./config.js";
 import { openDatabase } from "./database.js";
 import { loadMasterKey, hashPassword, verifyPassword, token, digest, encrypt } from "./crypto.js";
-import { credentialsSchema, mutationSchema, privateSchema, idSchema, publicNode, publicEdge, PROTOCOL_VERSION } from "./schemas.js";
+import { credentialsSchema, mutationSchema, historyActionSchema, privateSchema, idSchema, publicNode, publicEdge, PROTOCOL_VERSION } from "./schemas.js";
 import { Rooms, HttpError, auditStep } from "./rooms.js";
 import { safeMediaTypes } from "./egress.js";
+import { providerPolicy, providerPolicySchema } from "./provider-policy.js";
+import { applyHistory } from "./history.js";
 import { privateRecord, registerWorkflowRoutes } from "./workflow-routes.js";
 import { backupDatabase, checkStorage, clearDownloadCache, saveEncryptedFile, readEncryptedFile } from "./storage.js";
 
@@ -86,7 +88,8 @@ export async function createApp(options = {}) {
     if (["/api/meta", "/api/auth/login", "/api/auth/register", "/health"].includes(pathname)) return;
     request.session = await sessionFromCookie(request.headers.cookie);
     if (mutating && request.headers["x-csrf-token"] !== request.session.csrf) throw new HttpError(403, "安全验证已失效，请刷新页面");
-    if (mutating && /^\/api\/rooms\/[^/]+\/(operations|private\/[^/]+(?:\/(run|publish))?)$/.test(request.routeOptions.url || pathname) && request.headers["x-canvas-protocol"] !== PROTOCOL_VERSION) throw new HttpError(409, "协作服务已更新，请刷新网页后继续；本次修改未保存");
+    const route = request.routeOptions.url || pathname;
+    if (mutating && (/^\/api\/rooms\/[^/]+\/(operations|history\/[^/]+|private\/[^/]+(?:\/(run|publish))?)$/.test(route) || route.startsWith("/api/node-templates") || route === "/api/admin/providers") && request.headers["x-canvas-protocol"] !== PROTOCOL_VERSION) throw new HttpError(409, "协作服务已更新，请刷新网页后继续；本次修改未保存");
   });
   app.addHook("preHandler", async (request) => {
     // Recheck after reading a body: a slow upload cannot retain an expired/login-revoked session.
@@ -242,6 +245,13 @@ export async function createApp(options = {}) {
   app.post("/api/rooms/:roomId/operations", { config: writeRate }, async (request) => {
     await checkStorage(config);
     return rooms.apply(validateRoom(request), request.session.user.id, mutationSchema.parse(request.body));
+  });
+
+  app.post("/api/rooms/:roomId/history/:historyId", { config: writeRate }, async (request) => {
+    const roomId = validateRoom(request), historyId = idSchema.parse(request.params.historyId);
+    const action = historyActionSchema.parse(request.body);
+    await checkStorage(config);
+    return applyHistory(rooms, roomId, request.session.user.id, historyId, action, async () => { await sessionFromCookie(request.headers.cookie); });
   });
 
   app.get("/api/rooms/:roomId/shares", async (request) => {
@@ -405,13 +415,15 @@ export async function createApp(options = {}) {
   app.post("/api/admin/backup", { config: writeRate }, async (request) => { admin(request); return { backup: await backup() }; });
   app.get("/api/admin/providers", async (request) => {
     admin(request);
-    const setting = await db.get("SELECT value FROM settings WHERE key='api_hosts'");
-    return { hosts: setting ? JSON.parse(setting.value) : config.allowedHosts };
+    return providerPolicy(db, config);
   });
   app.put("/api/admin/providers", { config: writeRate }, async (request) => {
     admin(request);
-    const { hosts } = z.object({ hosts: z.array(z.hostname()) }).strict().parse(request.body);
-    await db.run("INSERT INTO settings(key,value) VALUES('api_hosts',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify([...new Set(hosts.map((host) => host.toLowerCase()))])]);
+    const policy = providerPolicySchema.parse(request.body);
+    await db.transaction([
+      { sql: "INSERT INTO settings(key,value) VALUES('api_host_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params: [JSON.stringify(policy)] },
+      auditStep(request.session.user.id, null, "providers.update", policy.whitelistEnabled ? "whitelist" : "blacklist"),
+    ]);
     return { ok: true };
   });
 
@@ -441,10 +453,13 @@ export async function createApp(options = {}) {
   const dummyPassword = await hashPassword(token());
   const backupTimer = config.BACKUP_DIR ? setInterval(() => { void backup().catch(() => {}); }, config.BACKUP_INTERVAL_MS) : null;
   backupTimer?.unref();
-  app.addHook("onClose", async () => {
+  // Upgraded sockets must close before Fastify waits for the HTTP server to stop.
+  app.addHook("preClose", async () => {
     if (backupTimer) clearInterval(backupTimer);
-    loopDelay.disable();
     await rooms.close();
+  });
+  app.addHook("onClose", async () => {
+    loopDelay.disable();
     if (backupActive) await backupActive.catch(() => {});
     await db.close();
   });

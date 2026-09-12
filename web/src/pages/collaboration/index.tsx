@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Form, Input, InputNumber, Modal, Space } from "antd";
+import { Alert, App, Button, Form, Input, InputNumber, Modal, Space, Switch } from "antd";
 import { LockKeyhole, LogOut, Plus, Users } from "lucide-react";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { collaborationApi, CollaborationError, setCollaborationSession, type CollaborationMeta, type CollaborationSession, type SharedRoom } from "@/services/api/collaboration";
+import { collaborationApi, CollaborationError, setCollaborationSession, type CollaborationMeta, type CollaborationSession, type SharedRoom, type ProviderPolicy } from "@/services/api/collaboration";
 import { CollaborationBoard } from "./board";
 
 // Consume invitation fragments before making any requests. Never store them in local/session storage.
@@ -35,6 +35,8 @@ export default function CollaborationPage() {
     const [adminOpen, setAdminOpen] = useState(false);
     const [passwordOpen, setPasswordOpen] = useState(false);
     const [hosts, setHosts] = useState("");
+    const [blockedHosts, setBlockedHosts] = useState("");
+    const [whitelistEnabled, setWhitelistEnabled] = useState(true);
     const [uploadMiB, setUploadMiB] = useState<number | null>(null);
     const [adminStatus, setAdminStatus] = useState<{ lastBackup: { createdAt: string } | null; backupError: string | null } | null>(null);
 
@@ -90,8 +92,9 @@ export default function CollaborationPage() {
     };
     const openAdmin = async () => {
         try {
-            const [providers, status, settings] = await Promise.all([collaborationApi<{ hosts: string[] }>("/admin/providers"), collaborationApi<{ lastBackup: { createdAt: string } | null; backupError: string | null }>("/admin/status"), collaborationApi<{ maxFileBytes: number }>("/admin/settings")]);
-            setHosts(providers.hosts.join("\n")); setAdminStatus(status); setUploadMiB(settings.maxFileBytes / 1048576); setAdminOpen(true);
+            const [providers, status, settings] = await Promise.all([collaborationApi<ProviderPolicy>("/admin/providers"), collaborationApi<{ lastBackup: { createdAt: string } | null; backupError: string | null }>("/admin/status"), collaborationApi<{ maxFileBytes: number }>("/admin/settings")]);
+            setHosts(providers.whitelist.join("\n")); setBlockedHosts(providers.blacklist.join("\n")); setWhitelistEnabled(providers.whitelistEnabled);
+            setAdminStatus(status); setUploadMiB(settings.maxFileBytes / 1048576); setAdminOpen(true);
         } catch (error) { message.error((error as Error).message); }
     };
 
@@ -142,9 +145,13 @@ export default function CollaborationPage() {
                     catch (error) { message.error((error as Error).message); } finally { setBusy(false); }
                 }}>保存上传上限</Button></Space>
                 <p className="mb-6 mt-2 text-xs opacity-65">对新上传立即生效，已上传文件仍可下载。</p>
-                <p className="mb-3 text-sm">允许隐私节点访问的 API 域名，每行一个。只填写可信服务商的域名，所有请求仍会检查目标 IP。</p>
-                <Input.TextArea aria-label="允许的 API 域名" value={hosts} onChange={(event) => setHosts(event.target.value)} autoSize={{ minRows: 5 }} placeholder="api.example.com" />
-                <Button className="mt-3" onClick={async () => { try { await collaborationApi("/admin/providers", { method: "PUT", body: JSON.stringify({ hosts: hosts.split(/[\s,]+/).filter(Boolean) }) }); message.success("API 域名已保存"); } catch (error) { message.error((error as Error).message); } }}>保存 API 域名</Button>
+                <Space className="mb-3"><Switch aria-label="启用域名白名单" checked={whitelistEnabled} onChange={setWhitelistEnabled} /><span>启用域名白名单</span></Space>
+                <p className="mb-3 text-xs opacity-65">开启时只允许白名单中的完整域名；关闭时允许黑名单以外的公网域名，黑名单同时阻止子域。两份名单独立保存，切换模式不会清空。API 和结果媒体使用同一规则，内网地址始终禁止。</p>
+                <label className="mb-2 block text-sm" htmlFor="provider-whitelist">白名单{whitelistEnabled ? "（当前生效）" : "（保留，当前不生效）"}</label>
+                <Input.TextArea id="provider-whitelist" aria-label="API 域名白名单" value={hosts} onChange={(event) => setHosts(event.target.value)} autoSize={{ minRows: 3 }} placeholder="api.example.com" />
+                <label className="mb-2 mt-4 block text-sm" htmlFor="provider-blacklist">黑名单{!whitelistEnabled ? "（当前生效）" : "（保留，当前不生效）"}</label>
+                <Input.TextArea id="provider-blacklist" aria-label="API 域名黑名单" value={blockedHosts} onChange={(event) => setBlockedHosts(event.target.value)} autoSize={{ minRows: 3 }} placeholder="blocked.example.com" />
+                <Button className="mt-3" loading={busy} onClick={async () => { setBusy(true); try { await collaborationApi("/admin/providers", { method: "PUT", body: JSON.stringify({ whitelistEnabled, whitelist: hosts.split(/[\s,]+/).filter(Boolean), blacklist: blockedHosts.split(/[\s,]+/).filter(Boolean) }) }); message.success("域名模式和两份名单已保存"); } catch (error) { message.error((error as Error).message); } finally { setBusy(false); } }}>保存域名规则</Button>
                 <p className="mb-3 mt-6 text-sm">最近云盘备份：{adminStatus?.lastBackup ? new Date(adminStatus.lastBackup.createdAt).toLocaleString() : "尚未完成"}</p>
                 {adminStatus?.backupError && <Alert type="error" title={adminStatus.backupError} className="mb-3" />}
                 <Button loading={busy} onClick={async () => { setBusy(true); try { await collaborationApi("/admin/backup", { method: "POST" }); await openAdmin(); message.success("加密备份已完成"); } catch (error) { message.error((error as Error).message); } finally { setBusy(false); } }}>立即加密备份</Button>

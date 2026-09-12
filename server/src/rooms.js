@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { digest, encrypt } from "./crypto.js";
 import { publicNode, publicEdge, cursorSchema, PROTOCOL_VERSION } from "./schemas.js";
 import { assertEdgeOwner, validateGraph } from "./graph.js";
+import { historyStep } from "./history.js";
 
 export class HttpError extends Error {
   constructor(statusCode, message, details) {
@@ -100,6 +101,7 @@ export class Rooms {
       }
       const changes = [];
       const steps = [];
+      const before = { nodes: {}, edges: {} }, after = { nodes: {}, edges: {} };
       const seen = new Set();
       const graphChanged = mutation.operations.some((operation) => ["connect", "disconnect", "delete"].includes(operation.type));
       const nodes = graphChanged ? new Map((await this.db.all("SELECT id,room_id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
@@ -110,7 +112,8 @@ export class Rooms {
         const id = operation.type === "create" ? operation.node.id : operation.id;
         if (seen.has(id)) throw new HttpError(400, "一批操作中不能重复修改同一节点");
         seen.add(id);
-        const existing = await this.db.get("SELECT id,room_id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=? AND id=?", [roomId, id]);
+        const existing = await this.db.get("SELECT * FROM nodes WHERE room_id=? AND id=?", [roomId, id]);
+        before.nodes[id] = existing || null;
         if (operation.type === "create") {
           if (existing) throw new HttpError(409, "节点已存在");
           const source = operation.node;
@@ -123,6 +126,7 @@ export class Rooms {
             ...(source.kind === "custom" ? { outputType: source.outputType || "text" } : {}) };
           const row = { id, room_id: roomId, owner_id: userId, visibility: isPrivate ? "private" : "public", version: 1, public_json: JSON.stringify(value) };
           const cipher = isPrivate ? encrypt(this.key, source.privateData, `${roomId}:${id}:${userId}`) : null;
+          after.nodes[id] = { ...row, private_cipher: cipher, private_version: 1, result_cipher: null };
           steps.push({ sql: "INSERT INTO nodes(id,room_id,owner_id,visibility,version,public_json,private_cipher) VALUES(?,?,?,?,?,?,?)",
             params: [id, roomId, userId, row.visibility, 1, row.public_json, cipher] });
           changes.push({ type: "upsert", node: publicNode(row) });
@@ -132,6 +136,7 @@ export class Rooms {
           if (existing.visibility === "private" && existing.owner_id !== userId) throw new HttpError(403, "不能修改他人的隐私节点");
           if (existing.version !== operation.version) throw new HttpError(409, "节点已被其他人修改，草稿已保留", { node: publicNode(existing) });
           if (operation.type === "delete") {
+            after.nodes[id] = null;
             steps.push({ sql: "DELETE FROM nodes WHERE room_id=? AND id=? AND version=?", params: [roomId, id, operation.version], expectChanges: 1 });
             changes.push({ type: "delete", id });
             nodes?.delete(id);
@@ -141,6 +146,7 @@ export class Rooms {
             if (operation.fields.outputType && JSON.parse(existing.public_json).kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
             const value = { ...JSON.parse(existing.public_json), ...operation.fields };
             const row = { ...existing, version: existing.version + 1, public_json: JSON.stringify(value) };
+            after.nodes[id] = row;
             steps.push({ sql: "UPDATE nodes SET public_json=?,version=? WHERE room_id=? AND id=? AND version=?",
               params: [row.public_json, row.version, roomId, id, operation.version], expectChanges: 1 });
             changes.push({ type: "upsert", node: publicNode(row) });
@@ -179,11 +185,13 @@ export class Rooms {
         for (const [id, old] of originalEdges) {
           const current = edges.get(id);
           if (!current || current.version !== old.version) {
+            before.edges[id] = old; after.edges[id] = current || null;
             deletes.push({ sql: "DELETE FROM edges WHERE room_id=? AND id=? AND version=?", params: [roomId, id, old.version], expectChanges: 1 });
             if (!current) changes.push({ type: "edge-delete", id });
           }
         }
         for (const [id, edge] of edges) if (originalEdges.get(id)?.version !== edge.version) {
+          before.edges[id] = originalEdges.get(id) || null; after.edges[id] = edge;
           inserts.push({ sql: "INSERT INTO edges(id,room_id,source,source_port,target,target_port,version) VALUES(?,?,?,?,?,?,?)",
             params: [id, roomId, edge.source, edge.source_port, edge.target, edge.target_port, edge.version] });
           changes.push({ type: "edge-upsert", edge: publicEdge(edge) });
@@ -191,8 +199,10 @@ export class Rooms {
         steps.unshift(...deletes);
         steps.push(...inserts);
       }
-      const result = { type: "changes", operationId: mutation.operationId, revision: access.revision + 1, changes };
+      const historyId = mutation.historyId || mutation.operationId;
+      const result = { type: "changes", operationId: mutation.operationId, historyId, revision: access.revision + 1, changes };
       steps.push(
+        await historyStep(this, roomId, userId, historyId, before, after),
         { sql: "UPDATE rooms SET revision=revision+1 WHERE id=? AND revision=?", params: [roomId, access.revision], expectChanges: 1 },
         { sql: "INSERT INTO receipts(room_id,user_id,operation_id,request_hash,result_json) VALUES(?,?,?,?,?)", params: [roomId, userId, mutation.operationId, requestHash, JSON.stringify(result)] },
         auditStep(userId, roomId, "nodes.update", mutation.operationId),

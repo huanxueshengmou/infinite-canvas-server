@@ -7,8 +7,11 @@ import { idSchema, privateSchema, templateSchema } from "./schemas.js";
 import { HttpError, auditStep } from "./rooms.js";
 import { checkStorage, saveEncryptedFile } from "./storage.js";
 import { executePrivateRequest, openResultMedia } from "./egress.js";
-import { atPath, parseResult, resultMedia, selectedMedia, graphContext, evaluateCustom, renderJson, renderText, requestBody } from "./workflow.js";
+import { atPath, parseResult, resultMedia, selectedMedia, graphContext, evaluateCustom } from "./workflow.js";
 import { builtInTemplates } from "./node-templates.js";
+import { providerPolicy } from "./provider-policy.js";
+import { withoutCredentials } from "./request-config.js";
+import { prepareRequest } from "./request-body.js";
 
 export function privateRecord(row, key, context) {
   const data = privateSchema.parse(decrypt(key, row.private_cipher, context));
@@ -22,7 +25,7 @@ export function registerWorkflowRoutes(app, { runIO, writeRate, sessionFromCooki
   const templateValue = (request) => {
     const value = templateSchema.parse(request.body);
     // Deliberately do not copy provider credentials into a reusable template.
-    if (value.privateData) value.privateData.request.apiKey = "";
+    if (value.privateData) value.privateData = withoutCredentials(value.privateData);
     return value;
   };
   app.get("/api/node-templates", async (request) => {
@@ -42,7 +45,7 @@ export function registerWorkflowRoutes(app, { runIO, writeRate, sessionFromCooki
   app.put("/api/node-templates/:templateId", { config: writeRate }, async (request) => {
     const id = idSchema.parse(request.params.templateId), userId = request.session.user.id;
     const { version, template } = z.object({ version: z.number().int().positive(), template: templateSchema }).strict().parse(request.body);
-    if (template.privateData) template.privateData.request.apiKey = "";
+    if (template.privateData) template.privateData = withoutCredentials(template.privateData);
     await checkStorage(config);
     const row = await db.get("SELECT version FROM node_templates WHERE id=? AND owner_id=?", [id, userId]);
     if (!row) throw new HttpError(404, "模板不存在或不属于当前账户");
@@ -98,8 +101,7 @@ export function registerWorkflowRoutes(app, { runIO, writeRate, sessionFromCooki
       return current;
     };
     try {
-      const setting = await db.get("SELECT value FROM settings WHERE key='api_hosts'");
-      const runtime = { ...config, allowedHosts: setting ? JSON.parse(setting.value) : config.allowedHosts, MAX_FILE_BYTES: await uploadLimit() };
+      const runtime = { ...config, providerPolicy: await providerPolicy(db, config), MAX_FILE_BYTES: await uploadLimit() };
       return await task({ row, context, record: privateRecord(row, key, context), runtime, signal: controller.signal, recheck });
     } finally { clearTimeout(timer); rooms.runningRequests.delete(active); reply.raw.off("close", abort); }
   });
@@ -114,15 +116,15 @@ export function registerWorkflowRoutes(app, { runIO, writeRate, sessionFromCooki
       return [field.name, value];
     }));
     const graph = action === "run" ? await graphContext(rooms, row.room_id, row.id, request.session.user.id, params) : null;
-    let outgoing;
+    let prepared;
     if (action === "poll") {
       if (!record.data.poll?.url || !record.result?.taskId) throw new HttpError(400, "尚无任务 ID 或未配置查询地址，请先提交任务");
-      outgoing = { ...record.data.request, method: "GET", body: "", url: renderText(record.data.poll.url, { params, task: { id: record.result.taskId } }, true) };
-    } else outgoing = { ...record.data.request, url: renderText(record.data.request.url, graph.context, true),
-      body: record.data.request.method === "POST" ? requestBody(renderJson(record.data.request.body, graph.context), key, runtime, signal) : "" };
+      prepared = prepareRequest({ ...record.data.request, method: "GET", url: record.data.poll.url }, { params, task: { id: record.result.taskId } }, key, runtime, signal);
+    } else prepared = prepareRequest(record.data.request, graph.context, key, runtime, signal);
     let result;
-    try { result = await (executeRequest || executePrivateRequest)(outgoing, runtime, signal); }
+    try { result = await (executeRequest || executePrivateRequest)(prepared.outgoing, runtime, signal); }
     catch (error) { throw error.statusCode ? error : new HttpError(signal.aborted ? 504 : 502, signal.aborted ? "API 请求超时或已取消；上游可能仍在执行，请先查询任务状态" : error.message); }
+    finally { await prepared.cleanup(); }
     result = { ...result, id: randomUUID(), configVersion: version, inputRevision: graph?.revision ?? record.result?.inputRevision };
     if (action === "poll") result.taskId = record.result.taskId;
     else if (record.data.poll) {

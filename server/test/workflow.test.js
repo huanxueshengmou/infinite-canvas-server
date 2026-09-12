@@ -170,20 +170,20 @@ test("one running request per private node prevents duplicate provider submissio
   assert.equal((await first).status, 200);
 });
 
-test("version 1 databases are backed up before the additive graph migration", async () => {
+for (const version of [1, 2]) test(`version ${version} databases preserve WAL data and are backed up before the history migration`, async () => {
   const root = await mkdtemp(join(tmpdir(), "canvas-migration-")), path = join(root, "canvas.sqlite");
   const original = new DatabaseSync(path);
-  original.exec("CREATE TABLE preserved(value TEXT); INSERT INTO preserved VALUES('keep-me'); PRAGMA user_version=1");
-  original.close();
+  original.exec(`PRAGMA journal_mode=WAL; CREATE TABLE preserved(value TEXT); INSERT INTO preserved VALUES('keep-me'); PRAGMA user_version=${version}`);
   const migrated = await openDatabase(path);
   try {
-    assert.equal((await migrated.get("PRAGMA user_version")).user_version, 2);
+    assert.equal((await migrated.get("PRAGMA user_version")).user_version, 3);
     assert.equal((await migrated.get("SELECT value FROM preserved")).value, "keep-me");
-    const backups = (await readdir(root)).filter((name) => name.startsWith("canvas.sqlite.before-v2-"));
+    assert.deepEqual(await migrated.all("SELECT * FROM operation_history"), []);
+    const backups = (await readdir(root)).filter((name) => name.startsWith("canvas.sqlite.before-v3-"));
     assert.equal(backups.length, 1);
     const backup = new DatabaseSync(join(root, backups[0]), { readOnly: true });
-    assert.equal(backup.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(backup.prepare("PRAGMA user_version").get().user_version, version);
     assert.equal(backup.prepare("SELECT value FROM preserved").get().value, "keep-me");
     backup.close();
-  } finally { await migrated.close(); }
+  } finally { await migrated.close(); original.close(); }
 });
