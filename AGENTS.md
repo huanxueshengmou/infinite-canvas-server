@@ -60,6 +60,7 @@
 ## 文档规范
 
 - README 保持简洁，只放项目介绍、核心功能、快速开始和文档入口。
+- 仓库首页 README 只介绍本仓库的协作功能，移除上游赞助、推广、联系方式和社区宣传，原项目仅保留一个来源链接；更新后核对 GitHub 默认分支实际展示的 README，不能只确认开发分支已推送。
 - `docs/index.md` 放给 AI 使用的文档索引，不要再放到 `docs/content/docs/` 内容目录里。
 - 详细功能介绍写到 `docs/content/docs/overview/features.mdx`。
 - 后续待办写到 `docs/content/docs/progress/todo.mdx`。
