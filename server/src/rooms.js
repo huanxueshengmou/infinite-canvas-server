@@ -4,6 +4,7 @@ import { digest, encrypt } from "./crypto.js";
 import { publicNode, publicEdge, cursorSchema, PROTOCOL_VERSION } from "./schemas.js";
 import { assertEdgeOwner, validateGraph } from "./graph.js";
 import { historyStep } from "./history.js";
+import { validateBoardLayout, validateBoardNode } from "./board-layout.js";
 
 export class HttpError extends Error {
   constructor(statusCode, message, details) {
@@ -107,7 +108,8 @@ export class Rooms {
       const before = { nodes: {}, edges: {} }, after = { nodes: {}, edges: {} };
       const seen = new Set();
       const graphChanged = mutation.operations.some((operation) => ["connect", "disconnect", "delete"].includes(operation.type));
-      const nodes = graphChanged ? new Map((await this.db.all("SELECT id,room_id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
+      const layoutChanged = mutation.operations.some((operation) => operation.type === "delete" || (operation.type === "create" && (operation.node.kind === "group" || operation.node.groupId)) || (operation.type === "update" && Object.hasOwn(operation.fields, "groupId")));
+      const nodes = graphChanged || layoutChanged ? new Map((await this.db.all("SELECT id,room_id,owner_id,visibility,version,public_json FROM nodes WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
       const edges = graphChanged ? new Map((await this.db.all("SELECT * FROM edges WHERE room_id=?", [roomId])).map((row) => [row.id, row])) : null;
       const originalEdges = edges ? new Map(edges) : null;
       const originalNodes = nodes ? new Map(nodes) : null;
@@ -123,10 +125,14 @@ export class Rooms {
           const isPrivate = source.kind === "private";
           if (isPrivate !== Boolean(source.privateData)) throw new HttpError(400, "隐私数据必须使用隐私节点");
           if (source.outputType && source.kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
+          if (isPrivate && (source.groupId || source.drawing)) throw new HttpError(400, "隐私节点不保存公开分组或笔迹");
           await this.checkFile(roomId, isPrivate ? null : source.fileId, source.kind);
           const value = { kind: source.kind, position: source.position, width: source.width, height: source.height,
             title: isPrivate ? "隐私节点" : source.title, content: isPrivate ? "" : source.content, fileId: isPrivate ? null : source.fileId,
-            ...(source.kind === "custom" ? { outputType: source.outputType || "text" } : {}) };
+            ...(source.kind === "custom" ? { outputType: source.outputType || "text" } : {}),
+            ...(Object.hasOwn(source, "groupId") ? { groupId: source.groupId } : {}),
+            ...(source.drawing ? { drawing: source.drawing } : source.kind === "whiteboard" ? { drawing: [] } : {}) };
+          validateBoardNode(value);
           const row = { id, room_id: roomId, owner_id: userId, visibility: isPrivate ? "private" : "public", version: 1, public_json: JSON.stringify(value) };
           const cipher = isPrivate ? encrypt(this.key, source.privateData, `${roomId}:${id}:${userId}`) : null;
           after.nodes[id] = { ...row, private_cipher: cipher, private_version: 1, result_cipher: null };
@@ -148,6 +154,7 @@ export class Rooms {
             await this.checkFile(roomId, operation.fields.fileId, JSON.parse(existing.public_json).kind);
             if (operation.fields.outputType && JSON.parse(existing.public_json).kind !== "custom") throw new HttpError(400, "输出格式只适用于自定义节点");
             const value = { ...JSON.parse(existing.public_json), ...operation.fields };
+            validateBoardNode(value);
             const row = { ...existing, version: existing.version + 1, public_json: JSON.stringify(value) };
             after.nodes[id] = row;
             steps.push({ sql: "UPDATE nodes SET public_json=?,version=? WHERE room_id=? AND id=? AND version=?",
@@ -202,6 +209,7 @@ export class Rooms {
         steps.unshift(...deletes);
         steps.push(...inserts);
       }
+      if (layoutChanged) validateBoardLayout(nodes);
       const historyId = mutation.historyId || mutation.operationId;
       const result = { type: "changes", operationId: mutation.operationId, historyId, revision: access.revision + 1, changes };
       steps.push(

@@ -1,6 +1,7 @@
 import { decrypt, encrypt, digest } from "./crypto.js";
 import { publicNode, publicEdge } from "./schemas.js";
 import { assertEdgeOwner, validateGraph } from "./graph.js";
+import { validateBoardLayout } from "./board-layout.js";
 import { HttpError, auditStep } from "./rooms.js";
 
 const context = (roomId, userId, id) => `history:${roomId}:${userId}:${id}`;
@@ -96,6 +97,7 @@ export async function applyHistory(rooms, roomId, userId, historyId, action, gua
     // New connections made by a collaborator cannot be silently deleted by undoing a node creation.
     if ([...edges.values()].some((edge) => !nodes.has(edge.source) || !nodes.has(edge.target))) fail();
     validateGraph(edges, nodes);
+    try { validateBoardLayout(nodes); } catch { fail(); }
     const steps = [];
     for (const id of Object.keys(from.edges)) if (originalEdges.has(id)) steps.push({ sql: "DELETE FROM edges WHERE room_id=? AND id=? AND version=?", params: [roomId, id, originalEdges.get(id).version], expectChanges: 1 });
     for (const id of Object.keys(from.nodes)) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent } from "react";
-import { Alert, App, Button, Dropdown, Input, Modal, Space, Tooltip } from "antd";
-import { ArrowLeft, Download, FileCode2, FileUp, LockKeyhole, Plus, RefreshCw, Share2, Trash2, Users, Workflow, Unplug, Cable, Undo2, Redo2 } from "lucide-react";
+import { Alert, App, Button, Dropdown, Input, Modal, Space, Tooltip, type MenuProps } from "antd";
+import { ArrowLeft, Download, FileCode2, FileUp, Group, LockKeyhole, Pencil, Plus, Presentation, RefreshCw, Share2, Trash2, Ungroup, Users, Workflow, Unplug, Cable, Undo2, Redo2 } from "lucide-react";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -15,6 +15,9 @@ import { CustomDialog } from "./custom-dialog";
 import { MarkdownNode } from "./markdown-node";
 import { FileNode } from "./file-node";
 import { transferFiles, useBoardTransfer } from "./use-board-transfer";
+import { WhiteboardNode } from "./whiteboard-node";
+import { ImageEditor } from "./image-editor";
+import { containingGroup, editsWithGroupBounds, expandGroups, groupSelection, layoutNodes, ungroupSelection } from "./board-layout";
 
 const syncLabels = { connecting: "连接中", synced: "已同步", pending: "后台同步中", offline: "离线 · 草稿仅在当前页", denied: "需要重新验证权限", conflict: "有编辑冲突" };
 const inputPorts: { id: InputPort; label: string; offset: number }[] = [{ id: "input", label: "文本 / JSON 输入", offset: 70 }, { id: "image", label: "图片输入", offset: 112 }, { id: "audio", label: "音频输入", offset: 154 }];
@@ -36,13 +39,14 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const [templatesOpen, setTemplatesOpen] = useState(false);
     const [createPoint, setCreatePoint] = useState<Point | undefined>();
     const [customId, setCustomId] = useState<string | null>(null);
+    const [imageEditor, setImageEditor] = useState<SharedNode | null>(null);
     const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
     const [wiring, setWiring] = useState<Wire | null>(null);
     const [portChoice, setPortChoice] = useState<{ wire: Wire; target: string; ports: typeof inputPorts } | null>(null);
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
     const [selection, setSelection] = useState<Selection | null>(null);
     const [viewport, setViewport] = useState<ViewportTransform>({ x: 100, y: 130, k: 1 });
-    const closePrivate = useCallback(() => { setPrivateId(null); setShareOpen(false); setTemplatesOpen(false); setCustomId(null); setWiring(null); setPortChoice(null); }, []);
+    const closePrivate = useCallback(() => { setPrivateId(null); setShareOpen(false); setTemplatesOpen(false); setCustomId(null); setImageEditor(null); setWiring(null); setPortChoice(null); }, []);
     const closeTemplates = useCallback(() => { setTemplatesOpen(false); setCreatePoint(undefined); }, []);
     const sync = useCollaboration(roomId, meta, closePrivate);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -51,7 +55,8 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const transfer = useBoardTransfer({ roomId, meta, sync, viewport, containerRef });
     const busy = transfer.busy;
     const canCreate = sync.canEdit && ["synced", "pending"].includes(sync.state) && !busy;
-    const drag = useRef<{ x: number; y: number; pointerId: number; nodes: { id: string; position: Point }[] } | null>(null);
+    const drag = useRef<{ x: number; y: number; dx: number; dy: number; pointerId: number; group: boolean; nodes: { id: string; position: Point }[] } | null>(null);
+    const displayed = layoutNodes(sync.nodes);
     const reportError = (error: unknown) => { message.error((error as Error).message); };
     const worldPoint = (event: { clientX: number; clientY: number }) => {
         const rect = containerRef.current?.getBoundingClientRect();
@@ -105,11 +110,15 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
         link.href = collaborationDownloadUrl(roomId, node.fileId, node.title); link.download = node.title;
         document.body.append(link); link.click(); link.remove();
     };
-    const remove = (nodes: SharedNode[]) => modal.confirm({
+    const groupSelected = async (ids = selectedNodes) => { const grouped = groupSelection(ids, sync.nodes); await sync.mutate(grouped.operations); setSelectedNodes(new Set([grouped.id])); };
+    const ungroupSelected = async (ids = selectedNodes) => { const released = ungroupSelection(ids, sync.nodes); if (released.operations.length) await sync.mutate(released.operations); setSelectedNodes(new Set(released.ids)); };
+    const remove = (chosen: SharedNode[]) => {
+        const nodes = expandGroups(new Set(chosen.map((node) => node.id)), sync.nodes);
+        return modal.confirm({
         title: `从协作画布中删除${nodes.length > 1 ? `选中的 ${nodes.length} 个` : "这个"}节点？`,
         content: "关联连线也会删除，可在当前页面通过撤销恢复。",
         onOk: async () => { try { await sync.mutate(nodes.map((node) => ({ type: "delete" as const, id: node.id, version: node.version }))); setSelectedNodes(new Set()); } catch (error) { message.error((error as Error).message); throw error; } },
-    });
+    }); };
     const startDrag = (event: PointerEvent<HTMLDivElement>, node: SharedNode) => {
         if (event.button !== 0 || event.ctrlKey || event.metaKey || wiring || !sync.canEdit || !availableNode(node)) return;
         if ((event.target as Element).closest("button,input,textarea")) return;
@@ -117,18 +126,35 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
         event.currentTarget.setPointerCapture(event.pointerId);
         const ids = selectedNodes.has(node.id) ? selectedNodes : new Set([node.id]);
         setSelectedNodes(ids); setSelectedEdge(null); sync.beginEditing();
-        drag.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId, nodes: sync.nodes.filter((item) => ids.has(item.id) && availableNode(item)).map(({ id, position }) => ({ id, position })) };
+        const moving = expandGroups(ids, displayed).filter(availableNode);
+        drag.current = { x: event.clientX, y: event.clientY, dx: 0, dy: 0, pointerId: event.pointerId, group: moving.some((item) => item.kind === "group"), nodes: moving.map(({ id, position }) => ({ id, position })) };
     };
     const moveDrag = (event: PointerEvent<HTMLDivElement>) => {
         const current = drag.current;
         if (!current || current.pointerId !== event.pointerId) return;
         const dx = (event.clientX - current.x) / viewport.k, dy = (event.clientY - current.y) / viewport.k;
-        if (dx || dy) sync.editMany(current.nodes.map(({ id, position }) => ({ id, fields: { position: { x: position.x + dx, y: position.y + dy } } })));
+        if (dx === current.dx && dy === current.dy) return;
+        current.dx = dx; current.dy = dy;
+        sync.editMany(editsWithGroupBounds(sync.nodes, current.nodes.map(({ id, position }) => ({ id, fields: { position: { x: position.x + dx, y: position.y + dy } } }))));
     };
-    const endDrag = () => { if (drag.current) { drag.current = null; sync.endEditing(); } };
+    const endDrag = () => {
+        const current = drag.current;
+        if (!current) return;
+        if (!current.group && (current.dx || current.dy)) {
+            const moved = new Set(current.nodes.map((node) => node.id));
+            const positions = new Map(current.nodes.map((node) => [node.id, { x: node.position.x + current.dx, y: node.position.y + current.dy }]));
+            const next = sync.nodes.map((node) => positions.has(node.id) ? { ...node, position: positions.get(node.id)! } : node);
+            const joining = next.filter((node) => moved.has(node.id) && node.kind !== "private").flatMap((node) => {
+                const groupId = containingGroup(node, next, node.groupId);
+                return groupId ? [{ id: node.id, fields: { groupId } }] : [];
+            });
+            if (joining.length) sync.editMany(editsWithGroupBounds(next, joining));
+        }
+        drag.current = null; sync.endEditing();
+    };
     const startSelection = (event: PointerEvent<HTMLDivElement>) => {
         if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || !containerRef.current?.contains(event.target as Node)) return;
-        if ((event.target as Element).closest("[data-node-id],[data-connection-id]")) return;
+        if ((event.target as Element).closest('[data-node-id]:not([data-node-kind="group"]),[data-connection-id],.cursor-move')) return;
         blurEditor();
         event.preventDefault(); event.stopPropagation();
         containerRef.current.setPointerCapture(event.pointerId);
@@ -181,7 +207,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
             if (selection && selection.pointerId === event.pointerId) {
                 const left = Math.min(selection.start.x, point.x), top = Math.min(selection.start.y, point.y), right = Math.max(selection.start.x, point.x), bottom = Math.max(selection.start.y, point.y);
                 setSelection({ ...selection, end: point });
-                setSelectedNodes(new Set([...selection.base, ...sync.nodes.filter((node) => availableNode(node) && node.position.x <= right && node.position.x + node.width >= left && node.position.y <= bottom && node.position.y + node.height >= top).map((node) => node.id)]));
+                setSelectedNodes(new Set([...selection.base, ...displayed.filter((node) => availableNode(node) && (node.kind === "group" ? node.position.x >= left && node.position.x + node.width <= right && node.position.y >= top && node.position.y + node.height <= bottom : node.position.x <= right && node.position.x + node.width >= left && node.position.y <= bottom && node.position.y + node.height >= top)).map((node) => node.id)]));
             }
         }} onPointerUp={(event) => {
             setSelection(null); endDrag();
@@ -195,7 +221,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                 if (!canCreate || wiring || event.ctrlKey || event.metaKey || event.altKey) return;
                 setCreatePoint(worldPoint(event)); setTemplatesOpen(true);
             }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void upload(transferFiles(event.dataTransfer), worldPoint(event)); }}>
-                <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1" aria-label="节点连线">
+                <svg className="pointer-events-none absolute left-0 top-0 z-[1] overflow-visible" width="1" height="1" aria-label="节点连线">
                     {sync.edges.map((edge) => {
                         const source = sync.nodes.find((node) => node.id === edge.source), target = sync.nodes.find((node) => node.id === edge.target);
                         if (!source || !target) return null;
@@ -207,19 +233,27 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                     })}
                     {wiring && (() => { const source = sync.nodes.find((node) => node.id === wiring.source); return source ? <path d={curve({ x: source.position.x + source.width, y: source.position.y + source.height / 2 }, wiring.point)} fill="none" stroke={theme.node.activeStroke} strokeWidth={2 / viewport.k} strokeDasharray="5 5" /> : null; })()}
                 </svg>
-                {sync.nodes.map((node) => {
+                {displayed.map((node) => {
                     const own = sync.ownPrivateIds.has(node.id);
                     const editable = sync.canEdit && (node.kind !== "private" || own);
-                    const highlighted = selectedNodes.has(node.id) || (wiring?.hover === node.id && wiring.source !== node.id);
+                    const highlighted = selectedNodes.has(node.id) || Boolean(node.groupId && selectedNodes.has(node.groupId)) || (wiring?.hover === node.id && wiring.source !== node.id);
                     const downloadable = Boolean(node.fileId && ["image", "video", "file"].includes(node.kind));
-                    return <Dropdown key={node.id} trigger={["contextMenu"]} disabled={!downloadable} popupRender={(menu) => <div data-canvas-no-zoom>{menu}</div>} menu={{ items: downloadable ? [{ key: "download", icon: <Download className="size-4" />, label: "下载文件", onClick: () => downloadFile(node) }] : [] }}>
-                    <div data-node-id={node.id} data-node-kind={node.kind} data-selected={selectedNodes.has(node.id) || undefined} className="absolute flex flex-col rounded-xl border" style={{ left: node.position.x, top: node.position.y, width: node.width, height: node.height, background: theme.node.panel, borderColor: highlighted ? theme.node.activeStroke : theme.node.stroke, outline: highlighted ? `1px solid ${theme.node.activeStroke}` : undefined }} onPointerDownCapture={(event) => {
+                    const items: MenuProps["items"] = [];
+                    if (node.kind === "image" && node.fileId) items.push({ key: "edit", icon: <Pencil className="size-4" />, label: "编辑图片", disabled: !canCreate, onClick: () => { blurEditor(); setImageEditor(node); } });
+                    if (downloadable) items.push({ key: "download", icon: <Download className="size-4" />, label: "下载文件", onClick: () => downloadFile(node) });
+                    if (!["private", "group"].includes(node.kind)) items.push({ key: "group", icon: <Group className="size-4" />, label: selectedNodes.has(node.id) && selectedNodes.size > 1 ? "编组选中节点" : "加入新分组", disabled: !canCreate, onClick: () => void groupSelected(selectedNodes.has(node.id) ? selectedNodes : new Set([node.id])).catch(reportError) });
+                    if (node.kind === "group" || node.groupId) items.push({ key: "ungroup", icon: <Ungroup className="size-4" />, label: node.kind === "group" ? "解散分组" : "移出分组", disabled: !canCreate, onClick: () => void ungroupSelected(new Set([node.id])).catch(reportError) });
+                    return <Dropdown key={node.id} trigger={["contextMenu"]} disabled={!items.length} popupRender={(menu) => <div data-canvas-no-zoom>{menu}</div>} menu={{ items }}>
+                    <div data-node-id={node.id} data-node-kind={node.kind} data-group-id={node.groupId || undefined} data-selected={selectedNodes.has(node.id) || undefined} className="absolute flex flex-col rounded-xl border" style={{ left: node.position.x, top: node.position.y, width: node.width, height: node.height, zIndex: node.kind === "group" ? 0 : 2, background: node.kind === "group" ? theme.canvas.selectionFill : theme.node.panel, borderColor: highlighted ? theme.node.activeStroke : theme.node.stroke, outline: highlighted ? `1px solid ${theme.node.activeStroke}` : undefined }} onDoubleClick={(event) => {
+                        if (node.kind !== "group" || event.target !== event.currentTarget || !canCreate || wiring || event.ctrlKey || event.metaKey || event.altKey) return;
+                        setCreatePoint(worldPoint(event)); setTemplatesOpen(true);
+                    }} onPointerDownCapture={(event) => {
                         if (event.button !== 0 || wiring || !availableNode(node) || isInput(event.target) || (event.target as Element).closest("button,a,video,.ant-dropdown")) return;
                         blurEditor();
                         if (event.ctrlKey || event.metaKey) { event.preventDefault(); event.stopPropagation(); setSelectedNodes((current) => { const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; }); setSelectedEdge(null); }
                         else if (!selectedNodes.has(node.id)) { setSelectedNodes(new Set([node.id])); setSelectedEdge(null); }
                     }}>
-                        {(node.kind !== "private" || own) && <>
+                        {!["group", "whiteboard"].includes(node.kind) && (node.kind !== "private" || own) && <>
                             <Tooltip open={wiring ? false : undefined} styles={{ root: { pointerEvents: "none" } }} title="输出：拖到下游节点即可连接，也可指定输入端口"><button type="button" data-output-port={node.id} aria-label={`${node.kind === "private" ? "隐私节点" : node.title} 输出端口`} disabled={!editable} className="absolute -right-2 top-1/2 z-10 size-4 -translate-y-1/2 cursor-crosshair rounded-full border-2" style={{ background: theme.node.panel, borderColor: theme.node.activeStroke }} onPointerDown={(event) => { event.stopPropagation(); event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setWiring({ source: node.id, point: worldPoint(event) }); setSelectedEdge(null); }} onClick={(event) => { if (event.detail === 0) setWiring({ source: node.id, point: { x: node.position.x + node.width, y: node.position.y + node.height / 2 } }); }} /></Tooltip>
                             {["custom", "private"].includes(node.kind) && inputPorts.map((port) => <Tooltip key={port.id} open={wiring ? false : undefined} styles={{ root: { pointerEvents: "none" } }} title={port.label}><button type="button" data-input-port={port.id} data-target-id={node.id} aria-label={`${node.kind === "private" ? "隐私节点" : node.title} ${port.label}`} disabled={!editable} className="absolute -left-2 z-10 size-4 -translate-y-1/2 cursor-crosshair rounded-full border-2" style={{ top: port.offset, background: theme.node.panel, borderColor: theme.node.activeStroke }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { if (event.detail === 0) void connectTo(node.id, port.id); }} /></Tooltip>)}
                         </>}
@@ -227,7 +261,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                             <span className="min-w-0 flex-1 truncate text-sm font-medium">{node.kind === "private" ? "隐私节点" : node.title || "未命名节点"}</span>
                             {editable && <Tooltip title="删除节点"><Button type="text" size="small" aria-label="删除节点" icon={<Trash2 className="size-3.5" />} onClick={() => remove([node])} /></Tooltip>}
                         </div>
-                        {node.kind === "private" ? <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-sm" style={{ color: theme.node.muted }}>
+                        {node.kind === "group" ? <div className="pointer-events-none flex flex-1 items-center justify-center text-xs opacity-40">{sync.nodes.some((item) => item.groupId === node.id) ? "" : "拖入节点加入此组 · 拖动组标题整体移动"}</div> : node.kind === "whiteboard" ? <WhiteboardNode node={node} editable={editable} selected={selectedNodes.has(node.id)} scale={viewport.k} onEdit={(fields) => sync.editMany(editsWithGroupBounds(sync.nodes, [{ id: node.id, fields }]))} onBegin={() => { blurEditor(); setSelectedNodes(new Set([node.id])); sync.beginEditing(); }} onEnd={sync.endEditing} /> : node.kind === "private" ? <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-sm" style={{ color: theme.node.muted }}>
                             <LockKeyhole className="size-7" /><span>内容仅创建者可见</span>
                             {own && <Button type="text" disabled={["offline", "denied", "connecting"].includes(sync.state)} onClick={() => setPrivateId(node.id)}>打开我的隐私内容</Button>}
                         </div> : node.kind === "custom" ? <div className="flex min-h-0 flex-1 flex-col gap-3 p-4"><span className="text-xs opacity-60">自定义 · {node.outputType === "json" ? "JSON 数据" : "文本拼接"}</span><pre className="min-h-0 flex-1 overflow-hidden whitespace-pre-wrap break-all text-xs opacity-70">{node.content}</pre><Button type="text" onClick={() => setCustomId(node.id)}>配置 / 计算输出</Button></div> : node.kind === "text" ? <div data-canvas-no-zoom className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3">
@@ -259,21 +293,25 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                 </Space>
             </header>
             {sync.error && <div className="absolute left-4 right-4 top-20 z-10"><Alert type={sync.state === "denied" ? "error" : "warning"} title={sync.error} /></div>}
-            <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 px-2 pb-4 pt-2 sm:inset-x-auto sm:bottom-2 sm:left-1/2 sm:min-w-max sm:-translate-x-1/2 sm:flex-nowrap" style={{ color: theme.node.text, background: theme.canvas.background }}>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 px-2 pb-4" style={{ color: theme.node.text }}>
+            <div className="pointer-events-auto order-2 flex max-w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 pt-2" style={{ background: theme.canvas.background }}>
                 <Tooltip title="撤销 Ctrl/⌘+Z"><Button type="text" aria-label="撤销" disabled={!sync.canEdit || !sync.history.canUndo || busy} icon={<Undo2 className="size-4" />} onClick={() => void sync.changeHistory("undo").catch(reportError)} /></Tooltip>
                 <Tooltip title="重做 Ctrl+Y / Ctrl/⌘+Shift+Z"><Button type="text" aria-label="重做" disabled={!sync.canEdit || !sync.history.canRedo || busy} icon={<Redo2 className="size-4" />} onClick={() => void sync.changeHistory("redo").catch(reportError)} /></Tooltip>
                 <Button type="text" disabled={!canCreate} icon={<Plus className="size-4" />} onClick={() => void create("text").catch(reportError)}>协作文本</Button>
                 <Button type="text" disabled={!canCreate} icon={<FileCode2 className="size-4" />} onClick={() => void create("markdown").catch(reportError)}>Markdown</Button>
+                <Button type="text" disabled={!canCreate} icon={<Presentation className="size-4" />} onClick={() => void create("whiteboard").catch(reportError)}>白板</Button>
+                <Button type="text" disabled={!canCreate} icon={<Group className="size-4" />} onClick={() => void create("group").catch(reportError)}>画布组</Button>
                 <Button type="text" disabled={!canCreate} aria-label="共享图片 / 文件" icon={<FileUp className="size-4" />} onClick={() => chooseFiles()}>{busy ? "正在加入…" : "图片 / 视频 / 文件"}</Button>
                 <Button type="text" disabled={!canCreate} icon={<Workflow className="size-4" />} onClick={() => { setCreatePoint(undefined); setTemplatesOpen(true); }}>节点模板</Button>
                 <Button type="text" disabled={!canCreate} icon={<LockKeyhole className="size-4" />} onClick={() => void create("private").catch(reportError)}>隐私节点</Button>
                 <span className="ml-3 text-xs opacity-60">{Math.round(viewport.k * 100)}%</span>
             </div>
-            <div className="pointer-events-none absolute bottom-28 left-4 right-4 text-center text-xs sm:bottom-20 sm:left-1/2 sm:right-auto sm:-translate-x-1/2" style={{ color: theme.node.muted }}>
+            <div className="order-1 max-w-full px-2 text-center text-xs" style={{ color: theme.node.muted }}>
                 {wiring ? <span>拖到下游节点即可连接，也可指定输入端口 · Esc 取消</span> : chosenEdge ? <Space className="pointer-events-auto">
                     <Button type="text" disabled={!edgeEditable} icon={<Cable className="size-4" />} onClick={() => { const target = sync.nodes.find((node) => node.id === chosenEdge.target)!; setWiring({ source: chosenEdge.source, edge: chosenEdge, point: target.position }); }}>重连输入</Button>
                     <Button type="text" disabled={!edgeEditable} icon={<Unplug className="size-4" />} onClick={() => void disconnect(chosenEdge)}>断开连线</Button>
-                </Space> : selected.length ? <Space className="pointer-events-auto"><span>已选择 {selected.length} 个节点 · Ctrl/⌘+C 复制 · 文件右键下载</span><Button type="text" disabled={!sync.canEdit || busy} icon={<Trash2 className="size-4" />} onClick={() => remove(selected)}>删除所选</Button></Space> : <span>双击空白处添加节点 · 拖入文件 / Ctrl/⌘+V 粘贴 · Ctrl/⌘+拖拽框选</span>}
+                </Space> : selected.length ? <Space wrap className="pointer-events-auto"><span>已选择 {selected.length} 个节点 · Ctrl/⌘+C 复制</span><Button type="text" disabled={!canCreate || selected.some((node) => node.kind === "private") || !expandGroups(selectedNodes, sync.nodes).some((node) => node.kind !== "group")} icon={<Group className="size-4" />} onClick={() => void groupSelected().catch(reportError)}>编组</Button>{selected.some((node) => node.kind === "group" || node.groupId) && <Button type="text" disabled={!canCreate} icon={<Ungroup className="size-4" />} onClick={() => void ungroupSelected().catch(reportError)}>{selected.some((node) => node.kind === "group") ? "解散分组" : "移出分组"}</Button>}<Button type="text" disabled={!sync.canEdit || busy} icon={<Trash2 className="size-4" />} onClick={() => remove(selected)}>删除所选</Button></Space> : <span>双击空白处添加节点 · 图片右键编辑 · Ctrl/⌘+拖拽框选编组</span>}
+            </div>
             </div>
             <Modal open={Boolean(portChoice)} title="选择输入类型" footer={null} onCancel={() => setPortChoice(null)} destroyOnHidden>
                 <p className="mb-4 text-sm opacity-70">这个输出可以接入多种输入，请选择本次连接要传递的数据类型。</p>
@@ -281,6 +319,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
             </Modal>
             <input ref={fileRef} type="file" multiple className="hidden" aria-label="上传共享文件" onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; void upload(files, uploadPoint.current); }} />
             {privateId && <PrivateDialog roomId={roomId} nodeId={privateId} onClose={closePrivate} canEdit={sync.canEdit} />}
+            {imageEditor && <ImageEditor roomId={roomId} node={imageEditor} onClose={() => setImageEditor(null)} onReplace={(blob) => transfer.replaceImage(imageEditor, blob)} />}
             {templatesOpen && <TemplatesDialog onClose={closeTemplates} onCreate={async (template) => { await create(template.kind, createPoint, template); }} onAddType={async (kind) => { if (["image", "video", "file"].includes(kind)) chooseFiles(kind, createPoint); else await create(kind, createPoint); }} />}
             {customNode && <CustomDialog key={customNode.id} roomId={roomId} node={customNode} canEdit={sync.canEdit} onClose={() => setCustomId(null)} onSave={async (version, fields) => { await sync.mutate([{ type: "update", id: customNode.id, version, fields }]); }} />}
             {shareOpen && sync.room && <ShareDialog room={sync.room} onClose={() => setShareOpen(false)} shareTtlMs={meta.shareTtlMs} />}

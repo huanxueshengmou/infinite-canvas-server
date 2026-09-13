@@ -1,12 +1,17 @@
-export const COLLABORATION_PROTOCOL = "4";
+export const COLLABORATION_PROTOCOL = "5";
 export type CollaborationUser = { id: string; username: string; admin: boolean };
 export type CollaborationSession = { user: CollaborationUser; csrf: string; expiresAt: number };
 export type CollaborationRole = "owner" | "editor" | "viewer";
 export type CollaborationCursor = { userId: string; username: string; position: { x: number; y: number } };
 export type ProviderPolicy = { whitelistEnabled: boolean; whitelist: string[]; blacklist: string[] };
+export type DrawingPoint = { x: number; y: number };
+export type DrawingItem =
+    | { type: "brush"; points: DrawingPoint[]; color: string; size: number }
+    | { type: "arrow"; from: DrawingPoint; to: DrawingPoint; color: string; size: number }
+    | { type: "text"; position: DrawingPoint; text: string; color: string; size: number };
 export type SharedNode = {
     id: string;
-    kind: "text" | "markdown" | "image" | "video" | "file" | "custom" | "private";
+    kind: "text" | "markdown" | "image" | "video" | "file" | "custom" | "private" | "group" | "whiteboard";
     position: { x: number; y: number };
     width: number;
     height: number;
@@ -15,6 +20,8 @@ export type SharedNode = {
     fileId: string | null;
     version: number;
     outputType?: "text" | "json";
+    groupId?: string | null;
+    drawing?: DrawingItem[];
 };
 export type InputPort = "input" | "image" | "audio";
 export type SharedEdge = { id: string; source: string; sourcePort: "output"; target: string; targetPort: InputPort; version: number };
@@ -35,7 +42,7 @@ export type ResultMedia = { path: string; type: "image" | "video" | "audio"; bas
 export type PrivateRecord = { data: PrivateData; version: number; result: { id: string; status: number; text: string; taskId?: string; configVersion?: number; inputRevision?: number } | null; media: ResultMedia[] };
 export type NodeTemplate = { id: string; name: string; kind: "custom" | "private"; content: string; outputType: "text" | "json"; privateData?: PrivateData; version: number; builtIn: boolean };
 export type TemplateInput = Pick<NodeTemplate, "name" | "kind" | "content" | "outputType" | "privateData">;
-export type NodeFields = Partial<Pick<SharedNode, "position" | "width" | "height" | "title" | "content" | "fileId" | "outputType">>;
+export type NodeFields = Partial<Pick<SharedNode, "position" | "width" | "height" | "title" | "content" | "fileId" | "outputType" | "groupId" | "drawing">>;
 export type NodeOperation =
     | { type: "create"; node: Omit<SharedNode, "version"> & { privateData?: PrivateData } }
     | { type: "update"; id: string; version: number; fields: NodeFields }

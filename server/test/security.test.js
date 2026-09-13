@@ -28,7 +28,7 @@ test("outdated clients cannot overwrite workflow data or receive incompatible sn
     ["POST", "/api/node-templates", {}],
     ["PUT", "/api/admin/providers", { hosts: [] }],
   ];
-  for (const version of [undefined, "1", "2", "3", "999"]) {
+  for (const version of [undefined, "1", "2", "3", "4", "999"]) {
     for (const [method, url, payload] of writes) {
       const headers = { origin: f.config.APP_ORIGIN, cookie: owner.cookie, "x-csrf-token": owner.csrf };
       if (version !== undefined) headers["x-canvas-protocol"] = version;

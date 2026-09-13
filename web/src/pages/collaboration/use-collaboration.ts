@@ -305,12 +305,12 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         } while (drafts.current.size || inFlight.current);
     }, [flush]);
 
-    const mutate = useCallback(async (operations: NodeOperation[]) => {
+    const mutate = useCallback(async (operations: NodeOperation[], options?: { preserveVersions?: boolean }) => {
         if (!ready.current || readOnly.current) throw new Error("请等待连接恢复并确认编辑权限");
         if (historyBusy.current || pendingHistory.current) throw new Error("请先等待撤销 / 重做结果确认");
         const changed = new Set(drafts.current.keys());
         await settle();
-        const batch = { operationId: crypto.randomUUID(), operations: operations.map((operation) => (operation.type === "update" || operation.type === "delete") && changed.has(operation.id) ? { ...operation, version: canonical.current.get(operation.id)?.version || operation.version } : operation) };
+        const batch = { operationId: crypto.randomUUID(), operations: operations.map((operation) => !options?.preserveVersions && (operation.type === "update" || operation.type === "delete") && changed.has(operation.id) ? { ...operation, version: canonical.current.get(operation.id)?.version || operation.version } : operation) };
         const privateIds = operations.filter((operation) => operation.type === "create" && operation.node.kind === "private").map((operation) => operation.type === "create" ? operation.node.id : "");
         localOperations.current.set(batch.operationId, { privateIds });
         const request = collaborationApi<ChangeEvent>(`/rooms/${roomId}/operations`, { method: "POST", body: JSON.stringify(batch) });

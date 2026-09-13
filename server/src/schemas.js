@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { requestSchema } from "./request-config.js";
 
-export const PROTOCOL_VERSION = "4";
+export const PROTOCOL_VERSION = "5";
 
 export const idSchema = z.string().uuid();
 export const credentialsSchema = z.object({
@@ -10,6 +10,12 @@ export const credentialsSchema = z.object({
 }).strict();
 export const positionSchema = z.object({ x: z.number().finite(), y: z.number().finite() }).strict();
 export const cursorSchema = z.object({ type: z.literal("cursor"), position: positionSchema.nullable() }).strict();
+const inkColor = z.union([z.string().regex(/^#[0-9a-f]{6}$/i), z.literal("currentColor")]);
+export const drawingSchema = z.array(z.discriminatedUnion("type", [
+  z.object({ type: z.literal("brush"), points: z.array(positionSchema).min(1), color: inkColor, size: z.number().positive().finite() }).strict(),
+  z.object({ type: z.literal("arrow"), from: positionSchema, to: positionSchema, color: inkColor, size: z.number().positive().finite() }).strict(),
+  z.object({ type: z.literal("text"), position: positionSchema, text: z.string(), color: inkColor, size: z.number().positive().finite() }).strict(),
+]));
 
 // Public records use an allowlist: no arbitrary plugin metadata, keys, prompts, URLs, or chat history.
 export const nodeFieldsSchema = z.object({
@@ -20,6 +26,8 @@ export const nodeFieldsSchema = z.object({
   content: z.string().optional(),
   fileId: idSchema.nullable().optional(),
   outputType: z.enum(["text", "json"]).optional(),
+  groupId: idSchema.nullable().optional(),
+  drawing: drawingSchema.optional(),
 }).strict();
 export const privateSchema = z.object({
   title: z.string(),
@@ -37,7 +45,7 @@ export const privateSchema = z.object({
 
 export const createNodeSchema = z.object({
   id: idSchema,
-  kind: z.enum(["text", "markdown", "image", "video", "file", "custom", "private"]),
+  kind: z.enum(["text", "markdown", "image", "video", "file", "custom", "private", "group", "whiteboard"]),
   position: positionSchema,
   width: z.number().positive().finite(),
   height: z.number().positive().finite(),
@@ -45,6 +53,8 @@ export const createNodeSchema = z.object({
   content: z.string().default(""),
   fileId: idSchema.nullable().default(null),
   outputType: z.enum(["text", "json"]).optional(),
+  groupId: idSchema.nullable().optional(),
+  drawing: drawingSchema.optional(),
   privateData: privateSchema.optional(),
 }).strict();
 
@@ -89,7 +99,9 @@ export function publicNode(row) {
     return { id: row.id, kind: "private", position: value.position, width: value.width, height: value.height, title: "隐私节点", content: "", fileId: null, version: row.version };
   }
   return { id: row.id, kind: value.kind, position: value.position, width: value.width, height: value.height, title: value.title, content: value.content, fileId: value.fileId, version: row.version,
-    ...(value.kind === "custom" ? { outputType: value.outputType || "text" } : {}) };
+    ...(value.kind === "custom" ? { outputType: value.outputType || "text" } : {}),
+    ...(Object.hasOwn(value, "groupId") ? { groupId: value.groupId } : {}),
+    ...(value.kind === "whiteboard" ? { drawing: value.drawing || [] } : {}) };
 }
 
 export const publicEdge = (row) => ({ id: row.id, source: row.source, sourcePort: row.source_port, target: row.target, targetPort: row.target_port, version: row.version });

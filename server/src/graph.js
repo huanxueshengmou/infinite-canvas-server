@@ -13,6 +13,7 @@ export function validateGraph(edges, nodes) {
     const source = nodes.get(edge.source), target = nodes.get(edge.target);
     if (!source || !target) throw new HttpError(400, "连线两端必须是当前画布中存在的节点");
     const from = JSON.parse(source.public_json), to = JSON.parse(target.public_json);
+    if (["whiteboard", "group"].includes(from.kind) || ["whiteboard", "group"].includes(to.kind)) throw new HttpError(400, "白板和分组没有输入或输出端口");
     if (!["custom", "private"].includes(to.kind)) throw new HttpError(400, "请连接到自定义节点或自己的隐私节点的输入端口");
     if (source.visibility === "private" && (target.visibility !== "private" || source.owner_id !== target.owner_id)) throw new HttpError(403, "隐私输出只能传给自己的隐私节点；公开前请使用发布结果并确认");
     if (edge.target_port === "image" && !["image", "private"].includes(from.kind)) throw new HttpError(400, "图片输入需要图片节点或自己的隐私结果");

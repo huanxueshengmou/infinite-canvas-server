@@ -3,6 +3,7 @@ import { App } from "antd";
 import { collaborationApi, emptyPrivateData, type CollaborationMeta, type NodeOperation, type NodeTemplate, type SharedNode } from "@/services/api/collaboration";
 import type { ViewportTransform } from "@/types/canvas";
 import type { useCollaboration } from "./use-collaboration";
+import { containingGroup, expandGroups, layoutNodes } from "./board-layout";
 
 export type BoardPoint = { x: number; y: number };
 type NewNode = Extract<NodeOperation, { type: "create" }>["node"];
@@ -38,7 +39,7 @@ export function useBoardTransfer({ roomId, meta, sync, viewport, containerRef }:
         const rowStart = position.x;
         let rowBottom = position.y;
         for (let attempt = 0; attempt <= occupied.length; attempt++) {
-            const collisions = occupied.filter((node) => position.x < node.position.x + node.width && position.x + width > node.position.x && position.y < node.position.y + node.height && position.y + height > node.position.y);
+            const collisions = occupied.filter((node) => node.kind !== "group" && position.x < node.position.x + node.width && position.x + width > node.position.x && position.y < node.position.y + node.height && position.y + height > node.position.y);
             if (!collisions.length) break;
             rowBottom = Math.max(rowBottom, ...collisions.map((node) => node.position.y + node.height));
             const nextX = Math.max(...collisions.map((node) => node.position.x + node.width)) + 32;
@@ -48,20 +49,41 @@ export function useBoardTransfer({ roomId, meta, sync, viewport, containerRef }:
         return position;
     };
     const makeNode = (kind: SharedNode["kind"], point?: BoardPoint, template?: NodeTemplate, fields?: Partial<NewNode>, reserved: NewNode[] = []): NewNode => {
-        const width = ["image", "video", "markdown"].includes(kind) ? 360 : 320, height = kind === "markdown" ? 340 : ["image", "video"].includes(kind) ? 300 : 240;
+        const width = kind === "group" ? 640 : kind === "whiteboard" ? 560 : ["image", "video", "markdown"].includes(kind) ? 360 : 320, height = kind === "group" ? 420 : kind === "whiteboard" ? 380 : kind === "markdown" ? 340 : ["image", "video"].includes(kind) ? 300 : 240;
+        const position = positionFor(width, height, [...current.current.sync.nodes, ...reserved], point);
+        const groupId = !["group", "private"].includes(kind) ? containingGroup({ position, width, height }, current.current.sync.nodes) : undefined;
         return {
             id: crypto.randomUUID(), kind, width, height,
-            position: positionFor(width, height, [...current.current.sync.nodes, ...reserved], point),
-            title: template?.name || (kind === "text" ? "新文本" : kind === "markdown" ? "Markdown" : ""),
+            position,
+            title: template?.name || (kind === "text" ? "新文本" : kind === "markdown" ? "Markdown" : kind === "whiteboard" ? "白板" : kind === "group" ? "画布组" : ""),
             content: template?.kind === "custom" ? template.content : "", fileId: null,
             ...(kind === "private" ? { privateData: template?.privateData ? structuredClone(template.privateData) : emptyPrivateData() } : {}),
-            ...(kind === "custom" ? { outputType: template?.outputType || "text" } : {}), ...fields,
+            ...(kind === "custom" ? { outputType: template?.outputType || "text" } : {}), ...(kind === "whiteboard" ? { drawing: [] } : {}), ...(groupId ? { groupId } : {}), ...fields,
         };
     };
     const create = (kind: SharedNode["kind"], point?: BoardPoint, template?: NodeTemplate) => run(async () => {
         const node = makeNode(kind, point, template);
         await current.current.sync.mutate([{ type: "create", node }]);
         return node;
+    });
+    const replaceImage = (original: SharedNode, blob: Blob) => run(async () => {
+        const abort = new AbortController(); controller.current = abort;
+        try {
+            const limits = await collaborationApi<CollaborationMeta>("/meta", { signal: abort.signal });
+            if (blob.size > limits.maxFileBytes) throw new Error(`编辑后的图片超过当前单文件上限 ${limits.maxFileBytes / 1048576} MiB`);
+            const title = /\.(png|jpe?g|gif|webp)$/i.test(original.title) ? original.title.replace(/\.[^.]+$/, ".png") : `${original.title || "编辑图片"}.png`;
+            const latest = () => {
+                const node = current.current.sync.nodes.find((item) => item.id === original.id);
+                if (!node || node.fileId !== original.fileId) throw new Error("原图已被修改或删除，编辑结果仍保留，可复制到剪贴板");
+                return node;
+            };
+            latest();
+            const body = new FormData(); body.append("file", blob, title);
+            const stored = await collaborationApi<{ id: string }>(`/rooms/${roomId}/files`, { method: "POST", body, signal: abort.signal });
+            abort.signal.throwIfAborted();
+            const node = latest();
+            await current.current.sync.mutate([{ type: "update", id: node.id, version: node.version, fields: { fileId: stored.id, title } }], { preserveVersions: true });
+        } finally { if (controller.current === abort) controller.current = null; }
     });
     const importFiles = (files: File[], point?: BoardPoint) => run(async () => {
         const abort = new AbortController(); controller.current = abort;
@@ -106,7 +128,7 @@ export function useBoardTransfer({ roomId, meta, sync, viewport, containerRef }:
         return added.map((node) => node.id);
     });
     const copy = (event: ClipboardEvent, selected: Set<string>) => {
-        const nodes = current.current.sync.nodes.filter((node) => selected.has(node.id) && node.kind !== "private");
+        const nodes = expandGroups(selected, current.current.sync.nodes).filter((node) => node.kind !== "private");
         if (!nodes.length || !event.clipboardData) return;
         event.preventDefault();
         // Only public IDs cross the clipboard; private configuration is never serialized.
@@ -124,21 +146,24 @@ export function useBoardTransfer({ roomId, meta, sync, viewport, containerRef }:
         const data = JSON.parse(raw);
         if (data?.roomId !== roomId || !Array.isArray(data.ids) || !data.ids.every((id: unknown) => typeof id === "string")) throw new Error("请在复制节点的原画布中粘贴，或直接加入原文件");
         return run(async () => {
-            const sources = current.current.sync.nodes.filter((node) => data.ids.includes(node.id) && node.kind !== "private");
+            const sources = layoutNodes(current.current.sync.nodes).filter((node) => data.ids.includes(node.id) && node.kind !== "private");
             if (!sources.length) throw new Error("复制的节点已不存在，请重新选择并复制");
             const left = Math.min(...sources.map((node) => node.position.x)), top = Math.min(...sources.map((node) => node.position.y));
             const width = Math.max(...sources.map((node) => node.position.x + node.width)) - left, height = Math.max(...sources.map((node) => node.position.y + node.height)) - top;
             const position = positionFor(width, height, current.current.sync.nodes);
+            const ids = new Map(sources.map((node) => [node.id, crypto.randomUUID()]));
             const operations: NodeOperation[] = sources.map((node) => ({ type: "create", node: {
-                id: crypto.randomUUID(), kind: node.kind, width: node.width, height: node.height,
+                id: ids.get(node.id)!, kind: node.kind, width: node.width, height: node.height,
                 position: { x: position.x + node.position.x - left, y: position.y + node.position.y - top },
                 title: node.title, content: node.content, fileId: node.fileId,
                 ...(node.kind === "custom" ? { outputType: node.outputType || "text" } : {}),
+                ...(node.groupId ? { groupId: ids.get(node.groupId) || null } : {}),
+                ...(node.kind === "whiteboard" ? { drawing: structuredClone(node.drawing || []) } : {}),
             } }));
             if (operationBytes(operations) > meta.maxSyncBytes) throw new Error("复制的内容超过当前单次同步上限，请减少所选节点后粘贴");
             await current.current.sync.mutate(operations);
             return operations.map((operation) => operation.type === "create" ? operation.node.id : "");
         });
     };
-    return { busy, create, importFiles, copy, paste };
+    return { busy, create, importFiles, copy, paste, replaceImage };
 }

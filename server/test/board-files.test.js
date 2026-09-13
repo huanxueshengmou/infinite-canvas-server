@@ -108,3 +108,26 @@ test("Markdown nodes synchronize, feed text inputs, restore edits and reject vie
   const restored = (await f.request("GET", `/api/rooms/${room.id}`, undefined, viewer)).body.nodes.find((node) => node.id === markdown.id);
   assert.equal(restored.kind, "markdown"); assert.equal(restored.content, markdown.content); assert.equal(restored.version, 3);
 });
+
+test("edited images replace one node, retain downloadable originals and support guarded undo", async (t) => {
+  const f = await fixture(t), owner = await f.login(await f.user("owner")), room = await f.room(owner);
+  const original = await upload(f, room, owner, "original.png", "image/png", "original image bytes");
+  const edited = await upload(f, room, owner, "edited.png", "image/png", "edited image bytes");
+  assert.equal(original.status, 200); assert.equal(edited.status, 200);
+  const a = { ...textNode("original.png"), kind: "image", fileId: original.body.id }, b = { ...a, id: randomUUID() };
+  assert.equal((await f.send(room.id, owner, [a, b].map((node) => ({ type: "create", node })))).status, 200);
+  const changed = await f.send(room.id, owner, [{ type: "update", id: a.id, version: 1, fields: { fileId: edited.body.id, title: "edited.png" } }]);
+  assert.equal(changed.status, 200);
+  const current = (await f.request("GET", `/api/rooms/${room.id}`, undefined, owner)).body;
+  assert.equal(current.nodes.find((node) => node.id === a.id).fileId, edited.body.id);
+  assert.equal(current.nodes.find((node) => node.id === b.id).fileId, original.body.id);
+  assert.equal((await f.send(room.id, owner, [{ type: "update", id: a.id, version: 1, fields: { fileId: original.body.id } }])).status, 409);
+  for (const [file, bytes] of [[original, "original image bytes"], [edited, "edited image bytes"]]) {
+    const downloaded = await f.request("GET", `/api/rooms/${room.id}/files/${file.body.id}?download=image.png`, undefined, owner);
+    assert.equal(downloaded.status, 200); assert.equal(downloaded.body, bytes);
+  }
+  const undone = await f.request("POST", `/api/rooms/${room.id}/history/${changed.body.historyId}`, { operationId: randomUUID(), direction: "undo", nodes: { [a.id]: 2 }, edges: {} }, owner);
+  assert.equal(undone.status, 200);
+  assert.ok((await f.request("GET", `/api/rooms/${room.id}`, undefined, owner)).body.nodes.every((node) => node.fileId === original.body.id));
+  for (const kind of ["whiteboard", "group"]) assert.equal((await f.send(room.id, owner, [{ type: "create", node: { ...textNode(), kind, fileId: original.body.id } }])).status, 400);
+});

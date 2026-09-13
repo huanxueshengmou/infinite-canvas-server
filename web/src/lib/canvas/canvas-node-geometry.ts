@@ -1,6 +1,6 @@
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type ConnectionHandle } from "@/types/canvas";
 
-export function nodeBounds(nodes: CanvasNodeData[]) {
+export function nodeBounds(nodes: Pick<CanvasNodeData, "position" | "width" | "height">[]) {
     return nodes.reduce(
         (acc, node) => ({
             left: Math.min(acc.left, node.position.x),
@@ -57,7 +57,7 @@ export function collectGroupMemberNodes(selectedIds: Set<string>, nodes: CanvasN
     return nodes.filter((node) => node.type !== CanvasNodeType.Group && (selectedIds.has(node.id) || (node.metadata?.groupId != null && groups.has(node.metadata.groupId))));
 }
 
-export function getGroupWrapRect(members: CanvasNodeData[]) {
+export function getGroupWrapRect(members: Pick<CanvasNodeData, "position" | "width" | "height">[]) {
     const bounds = nodeBounds(members);
     return {
         x: bounds.left - GROUP_WRAP_PADDING,

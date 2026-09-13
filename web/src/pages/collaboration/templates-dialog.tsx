@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Alert, App, Button, Input, Modal, Space, Tag } from "antd";
-import { FileCode2, FileJson2, Image, LockKeyhole, Paperclip, Save, Trash2, Type, Video } from "lucide-react";
+import { FileCode2, FileJson2, Group, Image, LockKeyhole, Paperclip, Presentation, Save, Trash2, Type, Video } from "lucide-react";
 import { collaborationApi, type NodeTemplate, type SharedNode, type TemplateInput } from "@/services/api/collaboration";
 
 const nodeTypes: { kind: SharedNode["kind"]; label: string; icon: typeof Type }[] = [
@@ -8,6 +8,7 @@ const nodeTypes: { kind: SharedNode["kind"]; label: string; icon: typeof Type }[
     { kind: "image", label: "图片", icon: Image }, { kind: "video", label: "视频", icon: Video },
     { kind: "file", label: "文件附件", icon: Paperclip }, { kind: "custom", label: "自定义节点", icon: FileJson2 },
     { kind: "private", label: "隐私节点", icon: LockKeyhole },
+    { kind: "whiteboard", label: "白板", icon: Presentation }, { kind: "group", label: "画布组", icon: Group },
 ];
 
 export function TemplateSaveButton({ getTemplate, disabled }: { getTemplate: () => Promise<TemplateInput>; disabled?: boolean }) {
