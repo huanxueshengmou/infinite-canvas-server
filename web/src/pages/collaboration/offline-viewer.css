@@ -1,0 +1,46 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; }
+body { display: flex; flex-direction: column; overflow: hidden; background: var(--canvas); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+button, a { color: inherit; }
+button { border: 0; background: transparent; padding: 8px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+button:hover { background: var(--hover); }
+button:focus-visible, a:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 20px; z-index: 5; }
+.heading { min-width: 0; }
+h1 { font-size: 17px; margin: 0; overflow-wrap: anywhere; }
+.heading span, footer { color: var(--muted); font-size: 12px; }
+nav { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+output { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+#offline-viewport { position: relative; flex: 1; min-height: 0; overflow: hidden; outline: none; touch-action: none; background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 24px 24px; cursor: grab; }
+#offline-viewport.dragging { cursor: grabbing; user-select: none; }
+#offline-world { position: absolute; inset: 0; transform-origin: 0 0; }
+.connections { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; z-index: 1; }
+.node { position: absolute; display: flex; flex-direction: column; border: 1px solid var(--stroke); border-radius: 12px; background: var(--panel); z-index: 2; cursor: default; }
+.node h2 { font-size: 14px; font-weight: 600; margin: 0; height: 43px; flex-shrink: 0; padding: 11px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group { z-index: 0; background: var(--selection); }
+.group, .group h2 { cursor: grab; }
+.scroll { overflow: auto; min-height: 0; padding: 4px 12px 12px; flex: 1; user-select: text; cursor: text; overflow-wrap: anywhere; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: inherit; }
+.markdown p, .markdown ul, .markdown ol, .markdown pre, .markdown blockquote { margin: 0 0 12px; }
+.markdown h1, .markdown h2, .markdown h3 { height: auto; padding: 0; margin: 0 0 10px; white-space: normal; overflow: visible; }
+.markdown h1 { font-size: 22px; } .markdown h2 { font-size: 19px; } .markdown h3 { font-size: 16px; }
+.markdown ul, .markdown ol { padding-left: 24px; }
+.markdown pre { padding: 8px; border: 1px solid var(--stroke); border-radius: 6px; overflow: auto; }
+.markdown code { font-family: ui-monospace, monospace; font-size: 12px; }
+.markdown table { border-collapse: collapse; width: 100%; } .markdown td, .markdown th { border: 1px solid var(--stroke); padding: 5px; }
+.markdown blockquote { padding-left: 12px; border-left: 3px solid var(--stroke); }
+.markdown a { text-decoration: underline; }
+.whiteboard { flex: 1; width: 100%; min-height: 0; overflow: hidden; border-radius: 0 0 12px 12px; }
+.file-content { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; padding: 4px 12px 12px; flex: 1; min-height: 0; }
+.file-content img, .file-content video { width: 100%; flex: 1; min-height: 0; object-fit: contain; }
+.file-content img { cursor: zoom-in; }
+.file-content a { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.private-note, .media-error { color: var(--muted); text-align: center; margin: auto; padding: 12px; }
+.empty { position: absolute; inset: 45% 0 auto; text-align: center; color: var(--muted); }
+footer { padding: 8px 16px; text-align: center; }
+dialog { padding: 16px; border: 1px solid var(--stroke); border-radius: 12px; background: var(--panel); color: var(--text); max-width: 95vw; max-height: 95vh; }
+dialog::backdrop { background: var(--canvas); opacity: .9; }
+dialog img { display: block; max-width: 88vw; max-height: 78vh; object-fit: contain; }
+dialog button { display: block; margin-left: auto; }
+[hidden] { display: none !important; }
+@media (max-width: 600px) { .toolbar { padding: 10px 12px; } .toolbar nav { width: 100%; } footer { font-size: 11px; padding: 6px 10px; } }

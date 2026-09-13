@@ -305,6 +305,13 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         } while (drafts.current.size || inFlight.current);
     }, [flush]);
 
+    const exportSnapshot = useCallback(async (signal: AbortSignal) => {
+        if (!ready.current || historyBusy.current || pendingHistory.current) throw new Error("请等待画布同步和撤销操作完成后再导出");
+        if (!readOnly.current) await settle();
+        signal.throwIfAborted();
+        return collaborationApi<SharedRoom & { nodes: SharedNode[]; edges: SharedEdge[] }>(`/rooms/${roomId}`, { signal });
+    }, [roomId, settle]);
+
     const mutate = useCallback(async (operations: NodeOperation[], options?: { preserveVersions?: boolean }) => {
         if (!ready.current || readOnly.current) throw new Error("请等待连接恢复并确认编辑权限");
         if (historyBusy.current || pendingHistory.current) throw new Error("请先等待撤销 / 重做结果确认");
@@ -355,7 +362,7 @@ export function useCollaboration(roomId: string, meta: CollaborationMeta, onDeni
         void flush();
     };
     const setCursor = (position: CollaborationCursor["position"] | null) => { cursor.current = position; cursorDirty.current = true; };
-    return { room, nodes, edges, ownPrivateIds, state, error, online, cursors, setCursor, conflicts, edit: (id: string, fields: NodeFields) => editMany([{ id, fields }]), editMany, mutate, history, changeHistory,
+    return { room, nodes, edges, ownPrivateIds, state, error, online, cursors, setCursor, conflicts, edit: (id: string, fields: NodeFields) => editMany([{ id, fields }]), editMany, mutate, history, changeHistory, exportSnapshot,
         beginEditing: () => { editingGroup.current = crypto.randomUUID(); }, endEditing: () => { editingGroup.current = null; void flush(); }, reconnect: () => reconnect.current(),
         resolveConflict, getDraft: (id: string) => drafts.current.get(id), canEdit: room?.role !== "viewer" && !history.busy && !["connecting", "denied"].includes(state) };
 }

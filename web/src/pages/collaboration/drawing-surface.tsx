@@ -17,7 +17,7 @@ export function DrawingToolbar({ value, onChange, crop = false, disabled = false
     </div>;
 }
 
-function Marks({ drawing }: { drawing: DrawingItem[] }) {
+export function Marks({ drawing }: { drawing: DrawingItem[] }) {
     return <g pointerEvents="none">{drawing.map((mark, index) => mark.type === "text" ? <text key={index} data-drawing-type="text" fill={mark.color} fontSize={mark.size} fontFamily="sans-serif">{textLines(mark).map((line, i) => <tspan key={i} x={line.x} y={line.y}>{line.text}</tspan>)}</text> : <g key={index} data-drawing-type={mark.type} fill="none" stroke={mark.color} strokeWidth={mark.size} strokeLinecap="round" strokeLinejoin="round">
         {mark.type === "brush" && mark.points.length === 1 ? <circle cx={mark.points[0].x} cy={mark.points[0].y} r={mark.size / 2} fill={mark.color} stroke="none" /> : (mark.type === "brush" ? [mark.points] : arrowLines(mark)).map((points, i) => <polyline key={i} points={points.map((point) => `${point.x},${point.y}`).join(" ")} />)}
     </g>)}</g>;

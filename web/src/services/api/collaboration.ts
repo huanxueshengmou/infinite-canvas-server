@@ -76,3 +76,12 @@ export async function collaborationApi<T>(path: string, init: RequestInit = {}):
 export const emptyPrivateData = (): PrivateData => ({ title: "我的隐私节点", note: "", category: "request", fields: [], request: { url: "", method: "POST", apiKey: "", header: "Authorization", authMode: "auto", bodyFormat: "json", contentType: "text/plain; charset=utf-8", headers: [], body: '{\n  "prompt": "{{input.text}}"\n}' } });
 export const collaborationFileUrl = (roomId: string, id: string) => `/api/rooms/${roomId}/files/${id}`;
 export const collaborationDownloadUrl = (roomId: string, id: string, filename: string) => `${collaborationFileUrl(roomId, id)}?${new URLSearchParams({ download: filename })}`;
+
+export async function collaborationFileBlob(roomId: string, id: string, signal: AbortSignal) {
+    const response = await fetch(collaborationFileUrl(roomId, id), { credentials: "same-origin", cache: "no-store", signal, headers: { "X-Canvas-Protocol": COLLABORATION_PROTOCOL } });
+    if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new CollaborationError(data?.error || `附件下载失败（${response.status}）`, response.status);
+    }
+    return response.blob();
+}

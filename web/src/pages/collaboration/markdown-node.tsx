@@ -19,6 +19,10 @@ const components: Components = {
     pre: ({ children }) => <pre className="overflow-auto rounded border border-current/15 p-2 text-xs">{children}</pre>,
 };
 
+export function MarkdownContent({ content }: { content: string }) {
+    return <Streamdown mode="static" controls={false} skipHtml rehypePlugins={markdownPlugins} urlTransform={safeUrl} components={components} className="space-y-3 [&_h1]:text-xl [&_h2]:text-lg [&_h3]:font-semibold [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5 [&_table]:w-full [&_td]:border [&_td]:border-current/15 [&_td]:p-1 [&_th]:border [&_th]:border-current/15 [&_th]:p-1">{content}</Streamdown>;
+}
+
 export function MarkdownNode({ node, editable, onEdit, onBegin, onEnd }: {
     node: SharedNode; editable: boolean; onEdit: (fields: NodeFields) => void; onBegin: () => void; onEnd: () => void;
 }) {
@@ -30,7 +34,7 @@ export function MarkdownNode({ node, editable, onEdit, onBegin, onEnd }: {
             <Button type="text" size="small" aria-label={showEditor ? "预览 Markdown" : "编辑 Markdown"} disabled={!editable} icon={showEditor ? <Eye className="size-4" /> : <Code2 className="size-4" />} onClick={() => { onEnd(); setEditing(!editing); }}>{showEditor ? "预览" : "编辑"}</Button>
         </div>
         {showEditor ? <Input.TextArea aria-label="Markdown 内容" variant="borderless" className="!min-h-0 !flex-1 !resize-none !font-mono !text-sm" value={node.content} placeholder={"# 标题\n\n输入 Markdown 内容…"} onFocus={onBegin} onBlur={onEnd} onChange={(event) => onEdit({ content: event.target.value })} /> : <div aria-label="Markdown 预览" className="min-h-0 flex-1 select-text overflow-auto break-words text-sm leading-relaxed">
-            {node.content ? <Streamdown mode="static" controls={false} skipHtml rehypePlugins={markdownPlugins} urlTransform={safeUrl} components={components} className="space-y-3 [&_h1]:text-xl [&_h2]:text-lg [&_h3]:font-semibold [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-5 [&_ol]:pl-5 [&_table]:w-full [&_td]:border [&_td]:border-current/15 [&_td]:p-1 [&_th]:border [&_th]:border-current/15 [&_th]:p-1">{node.content}</Streamdown> : <span className="opacity-50">暂无 Markdown 内容</span>}
+            {node.content ? <MarkdownContent content={node.content} /> : <span className="opacity-50">暂无 Markdown 内容</span>}
         </div>}
     </div>;
 }

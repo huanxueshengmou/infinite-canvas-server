@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Form, Input, InputNumber, Modal, Space, Switch } from "antd";
-import { LockKeyhole, LogOut, Plus, Users } from "lucide-react";
+import { FileUp, LockKeyhole, LogOut, Plus, Users } from "lucide-react";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { collaborationApi, CollaborationError, setCollaborationSession, type CollaborationMeta, type CollaborationSession, type SharedRoom, type ProviderPolicy } from "@/services/api/collaboration";
 import { CollaborationBoard } from "./board";
+import { ImportBoardDialog } from "./archive-dialog";
 
 // Consume invitation fragments before making any requests. Never store them in local/session storage.
 let invitation = "";
@@ -20,6 +21,7 @@ if (typeof window !== "undefined" && window.location.pathname.startsWith("/colla
 export default function CollaborationPage() {
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const location = useLocation();
     const { roomId } = useParams();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [session, setSession] = useState<CollaborationSession | null>(null);
@@ -32,6 +34,7 @@ export default function CollaborationPage() {
     const [invitePassword, setInvitePassword] = useState("");
     const [error, setError] = useState("");
     const [createOpen, setCreateOpen] = useState(false);
+    const [importOpen, setImportOpen] = useState(false);
     const [adminOpen, setAdminOpen] = useState(false);
     const [passwordOpen, setPasswordOpen] = useState(false);
     const [hosts, setHosts] = useState("");
@@ -98,7 +101,7 @@ export default function CollaborationPage() {
         } catch (error) { message.error((error as Error).message); }
     };
 
-    if (session && roomId && meta && !invite) return <CollaborationBoard key={roomId} roomId={roomId} meta={meta} onBack={() => navigate("/collaboration")} />;
+    if (session && roomId && meta && !invite) return <CollaborationBoard key={roomId} roomId={roomId} meta={meta} fitOnLoad={Boolean(location.state?.fitCanvas)} onBack={() => navigate("/collaboration")} />;
 
     return (
         <main className="min-h-dvh overflow-auto" style={{ background: theme.canvas.background, color: theme.node.text }}>
@@ -125,11 +128,12 @@ export default function CollaborationPage() {
                     <Button type="text" className="mt-4" disabled={busy} onClick={() => { setRegister(!register); setError(""); }}>{register ? "已有账户，去登录" : (invite ? "还没有账户，接受邀请注册" : "没有账户？立即注册")}</Button>
                     {register && !invite && <p className="mt-3 text-xs opacity-60">注册后可以创建自己的画布，通过分享链接加入他人的画布。</p>}
                 </div> : invite ? <div className="mx-auto max-w-md space-y-4"><h2 className="text-xl font-medium">你收到一份画布邀请</h2><Input.Password aria-label="分享口令" placeholder="分享口令（未设置时留空）" value={invitePassword} onChange={(event) => setInvitePassword(event.target.value)} /><Space><Button type="primary" loading={busy} onClick={() => void join()}>接受邀请</Button><Button onClick={() => { setInvite(""); invitation = ""; }}>暂不加入</Button></Space></div> : <>
-                    <div className="mb-6 flex items-center justify-between"><p className="text-sm opacity-65">选择画布，与团队一起创作。</p><Button icon={<Plus className="size-4" />} onClick={() => setCreateOpen(true)}>创建协作画布</Button></div>
+                    <div className="mb-6 flex flex-wrap items-center justify-between gap-3"><p className="text-sm opacity-65">选择画布，与团队一起创作。</p><Space wrap><Button type="text" icon={<FileUp className="size-4" />} onClick={() => setImportOpen(true)}>导入 HTML</Button><Button icon={<Plus className="size-4" />} onClick={() => setCreateOpen(true)}>创建协作画布</Button></Space></div>
                     {!rooms.length ? <div className="py-24 text-center opacity-60">还没有协作画布。创建一个，或打开别人发来的邀请链接。</div> : <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">{rooms.map((room) => <button key={room.id} className="rounded-xl border p-6 text-left transition hover:opacity-75" style={{ borderColor: theme.node.stroke, background: theme.node.panel }} onClick={() => navigate(`/collaboration/${room.id}`)}><Users className="mb-5 size-6 opacity-60" /><h2 className="truncate text-lg font-medium">{room.title}</h2><p className="mt-2 text-xs opacity-60">{room.role === "owner" ? "我的画布" : room.role === "editor" ? "可以编辑" : "仅可查看"}</p></button>)}</div>}
                     <p className="mt-12 flex items-center gap-2 text-xs opacity-60"><LockKeyhole className="size-4" />隐私内容与协作内容分开保存，API 返回结果不会自动共享。</p>
                 </>}
             </div>
+            {session && importOpen && <ImportBoardDialog onClose={() => { setImportOpen(false); void loadRooms().catch((error) => setError(error.message)); }} onImported={(room) => { setImportOpen(false); navigate(`/collaboration/${room.id}`, { state: { fitCanvas: true } }); }} />}
             <Modal open={createOpen} title="创建协作画布" onCancel={() => setCreateOpen(false)} footer={null} destroyOnHidden>
                 <Form layout="vertical" onFinish={async ({ title }: { title: string }) => {
                     setBusy(true);

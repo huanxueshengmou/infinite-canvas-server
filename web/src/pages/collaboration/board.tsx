@@ -18,6 +18,7 @@ import { transferFiles, useBoardTransfer } from "./use-board-transfer";
 import { WhiteboardNode } from "./whiteboard-node";
 import { ImageEditor } from "./image-editor";
 import { containingGroup, editsWithGroupBounds, expandGroups, groupSelection, layoutNodes, ungroupSelection } from "./board-layout";
+import { ExportBoardDialog } from "./archive-dialog";
 
 const syncLabels = { connecting: "连接中", synced: "已同步", pending: "后台同步中", offline: "离线 · 草稿仅在当前页", denied: "需要重新验证权限", conflict: "有编辑冲突" };
 const inputPorts: { id: InputPort; label: string; offset: number }[] = [{ id: "input", label: "文本 / JSON 输入", offset: 70 }, { id: "image", label: "图片输入", offset: 112 }, { id: "audio", label: "音频输入", offset: 154 }];
@@ -31,11 +32,12 @@ const curve = (from: { x: number; y: number }, to: { x: number; y: number }) => 
     return `M ${from.x} ${from.y} C ${from.x + bend} ${from.y}, ${to.x - bend} ${to.y}, ${to.x} ${to.y}`;
 };
 
-export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; meta: CollaborationMeta; onBack: () => void }) {
+export function CollaborationBoard({ roomId, meta, onBack, fitOnLoad = false }: { roomId: string; meta: CollaborationMeta; onBack: () => void; fitOnLoad?: boolean }) {
     const { message, modal } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [privateId, setPrivateId] = useState<string | null>(null);
     const [shareOpen, setShareOpen] = useState(false);
+    const [exportOpen, setExportOpen] = useState(false);
     const [templatesOpen, setTemplatesOpen] = useState(false);
     const [createPoint, setCreatePoint] = useState<Point | undefined>();
     const [customId, setCustomId] = useState<string | null>(null);
@@ -46,7 +48,7 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
     const [selection, setSelection] = useState<Selection | null>(null);
     const [viewport, setViewport] = useState<ViewportTransform>({ x: 100, y: 130, k: 1 });
-    const closePrivate = useCallback(() => { setPrivateId(null); setShareOpen(false); setTemplatesOpen(false); setCustomId(null); setImageEditor(null); setWiring(null); setPortChoice(null); }, []);
+    const closePrivate = useCallback(() => { setPrivateId(null); setShareOpen(false); setExportOpen(false); setTemplatesOpen(false); setCustomId(null); setImageEditor(null); setWiring(null); setPortChoice(null); }, []);
     const closeTemplates = useCallback(() => { setTemplatesOpen(false); setCreatePoint(undefined); }, []);
     const sync = useCollaboration(roomId, meta, closePrivate);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -57,6 +59,16 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
     const canCreate = sync.canEdit && ["synced", "pending"].includes(sync.state) && !busy;
     const drag = useRef<{ x: number; y: number; dx: number; dy: number; pointerId: number; group: boolean; nodes: { id: string; position: Point }[] } | null>(null);
     const displayed = layoutNodes(sync.nodes);
+    const fitted = useRef(false);
+    useEffect(() => {
+        if (!fitOnLoad || fitted.current || sync.state !== "synced" || !containerRef.current) return;
+        fitted.current = true;
+        if (!displayed.length) return;
+        const left = Math.min(...displayed.map((node) => node.position.x)), top = Math.min(...displayed.map((node) => node.position.y));
+        const width = Math.max(...displayed.map((node) => node.position.x + node.width)) - left, height = Math.max(...displayed.map((node) => node.position.y + node.height)) - top;
+        const rect = containerRef.current.getBoundingClientRect(), k = Math.min(1, Math.max(.05, Math.min((rect.width - 120) / width, (rect.height - 180) / height)));
+        setViewport({ x: (rect.width - width * k) / 2 - left * k, y: (rect.height - height * k) / 2 - top * k, k });
+    }, [fitOnLoad, displayed, sync.state]);
     const reportError = (error: unknown) => { message.error((error as Error).message); };
     const worldPoint = (event: { clientX: number; clientY: number }) => {
         const rect = containerRef.current?.getBoundingClientRect();
@@ -288,10 +300,12 @@ export function CollaborationBoard({ roomId, meta, onBack }: { roomId: string; m
                 </div>
                 <Space className="pointer-events-auto" wrap>
                     <span className="mr-2 inline-flex items-center gap-1 text-sm"><Users className="size-4" />{sync.online} 人在线</span>
+                    <Button type="text" icon={<Download className="size-4" />} disabled={busy || sync.history.busy || !["synced", "pending"].includes(sync.state)} onClick={() => { blurEditor(); setExportOpen(true); }}>导出 HTML</Button>
                     <Button type="text" icon={<RefreshCw className="size-4" />} onClick={sync.reconnect}>重新连接</Button>
                     {sync.room?.role === "owner" && <Button type="text" icon={<Share2 className="size-4" />} onClick={() => setShareOpen(true)}>分享与权限</Button>}
                 </Space>
             </header>
+            {exportOpen && <ExportBoardDialog getSnapshot={sync.exportSnapshot} onClose={() => setExportOpen(false)} />}
             {sync.error && <div className="absolute left-4 right-4 top-20 z-10"><Alert type={sync.state === "denied" ? "error" : "warning"} title={sync.error} /></div>}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 px-2 pb-4" style={{ color: theme.node.text }}>
             <div className="pointer-events-auto order-2 flex max-w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 pt-2" style={{ background: theme.canvas.background }}>
